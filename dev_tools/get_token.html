@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <title>Firebase Token Generator</title>
+  </head>
+  <body>
+    <h1>Firebase ID Token Generator</h1>
+    <p>Open the browser console (F12) to see the ID token after logging in.</p>
+
+    <script type="module">
+      import { initializeApp } from "https://www.gstatic.com/firebasejs/9.6.10/firebase-app.js";
+      import {
+        getAuth,
+        signInWithEmailAndPassword,
+        onAuthStateChanged,
+      } from "https://www.gstatic.com/firebasejs/9.6.10/firebase-auth.js";
+
+      // TODO: Replace the following with your app's Firebase project configuration
+      const firebaseConfig = {REPLACE_WITH_YOUR_CONFIG};
+
+      const app = initializeApp(firebaseConfig);
+      const auth = getAuth(app);
+
+      // TODO: Add your test credentials here
+      const email = "test@test.com";
+      const password = "password";
+
+      signInWithEmailAndPassword(auth, email, password)
+        .then((userCredential) => {
+          const user = userCredential.user;
+          user.getIdToken().then((idToken) => {
+            console.log("--- COPY THIS ID TOKEN ---");
+            console.log(idToken);
+            console.log("--- END OF TOKEN ---");
+          });
+        })
+        .catch((error) => {
+          console.error("Login Failed:", error);
+        });
+    </script>
+  </body>
+</html>
