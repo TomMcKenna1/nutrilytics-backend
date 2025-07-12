@@ -42,7 +42,7 @@ def create_meal_draft(
 
     # Store the initial pending state
     DRAFT_DB[draft_id] = MealDraft(
-        status="pending", user_id=current_user.uid, meal=None
+        status="pending", uid=current_user.uid, meal=None
     )
 
     # Add the long-running generation task to the background
@@ -62,7 +62,7 @@ def get_meal_draft(draft_id: str, current_user: User = Depends(get_current_user)
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Draft not found"
         )
-    if draft.user_id != current_user.uid:
+    if draft.uid != current_user.uid:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Not authorized to access this draft",
@@ -81,7 +81,7 @@ def delete_meal_draft(draft_id: str, current_user: User = Depends(get_current_us
             status_code=status.HTTP_404_NOT_FOUND, detail="Draft not found"
         )
 
-    if draft.user_id != current_user.uid:
+    if draft.uid != current_user.uid:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Not authorized to access this draft",

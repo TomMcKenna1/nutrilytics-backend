@@ -148,7 +148,7 @@ _Description_: Poll to check the status of a meal generation task.
 ```json
 {
   "status": "pending",
-  "user_id": "user_firebase_uid",
+  "uid": "user_firebase_uid",
   "meal": null
 }
 ```
@@ -158,7 +158,7 @@ _Description_: Poll to check the status of a meal generation task.
 ```json
 {
   "status": "complete",
-  "user_id": "user_firebase_uid",
+  "uid": "user_firebase_uid",
   "meal": {
     "name": "Spaghetti Bolognese",
     "calories": 600,

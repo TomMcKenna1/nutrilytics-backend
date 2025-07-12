@@ -27,7 +27,7 @@ def save_meal_from_draft(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Draft not found."
         )
-    if draft.user_id != current_user.uid:
+    if draft.uid != current_user.uid:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Not authorized to access this draft.",
@@ -39,7 +39,7 @@ def save_meal_from_draft(
         )
 
     meal_data_to_save = draft.meal.model_dump()
-    meal_data_to_save["userId"] = current_user.uid
+    meal_data_to_save["uid"] = current_user.uid
     meal_data_to_save["createdAt"] = firestore.SERVER_TIMESTAMP
     doc_ref = db.collection("meals").document()
     doc_ref.set(meal_data_to_save)
@@ -67,7 +67,7 @@ def get_meal_by_id(
 
     meal_data = meal_doc.to_dict()
 
-    if meal_data.get("userId") != current_user.uid:
+    if meal_data.get("uid") != current_user.uid:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Not authorized to access this meal",

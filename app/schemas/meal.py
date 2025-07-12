@@ -15,8 +15,13 @@ class MealDraft(BaseModel):
     """Schema for the draft stored in our cache and returned to the user."""
 
     status: str
-    user_id: str
+    uid: str
     meal: Optional[Meal] = None
+
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True,
+    )
 
 
 class MealSaveFromDraftRequest(BaseModel):
