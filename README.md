@@ -1,44 +1,42 @@
 # Nutrilytics Backend API
 
-This repository contains the backend server for **Nutrilytics**, a mobile application for logging meals and tracking nutrition.
+This repository contains the backend server for **Nutrilytics**, a mobile application for logging meals and tracking nutrition. This API handles user authentication, meal data storage, and meal generation using **FastAPI** and **Google Firestore**.
 
-This API handles user authentication, meal data storage, and meal generation using FastAPI and Google Firestore.
-
-The API uses my meal-generator python library. See [meal-generator](https://github.com/TomMcKenna1/meal-generator) for more info!
+The API uses another one of my projects: the [meal-generator](https://github.com/TomMcKenna1/meal-generator) Python library. Check it out!
 
 ---
 
-## **Features** ✨
+## Features
 
-* **User Authentication**: Secure user management via Firebase Authentication.
-* **Meal Logging**: Full CRUD (Create, Read, Update, Delete) operations for user meals.
-* **AI-Powered Meal Generation**: Asynchronously generate detailed meal nutritional profiles from simple text descriptions.
-* **Secure Data Storage**: All user data is securely stored and tied to individual user accounts in Firestore.
-
----
-
-## **Tech Stack** 🚀
-
-* **Framework**: FastAPI
-* **Database**: Google Firestore
-* **Authentication**: Firebase Authentication
-* **Server**: Uvicorn
-* **Data Validation**: Pydantic
-* **AI**: Google Gemini
+- **User Authentication**: Secure user management via Firebase Authentication.  
+- **Meal Logging**: Full CRUD (Create, Read, Update, Delete) operations for user meals.  
+- **AI-Powered Meal Generation**: Asynchronously generate detailed meal nutritional profiles from simple text descriptions.  
+- **Secure Data Storage**: All user data is securely stored and tied to individual user accounts in Firestore.  
 
 ---
 
-## **Local Setup** ⚙️
+## Tech Stack
 
-To get the project running locally, follow these steps.
+- **Framework**: FastAPI  
+- **Database**: Google Firestore  
+- **Authentication**: Firebase Authentication  
+- **Server**: Uvicorn  
+- **Data Validation**: Pydantic  
+- **AI**: Google Gemini  
 
-### **1. Prerequisites**
+---
 
-* Python 3.8+
-* A Google Firebase project with Firestore and Authentication enabled.
-* A Google AI Studio API Key for Gemini.
+## Local Setup
 
-### **2. Clone & Setup**
+To get the project running locally, follow these steps:
+
+### 1. Prerequisites
+
+- Python 3.8+  
+- A Google Firebase project with Firestore and Authentication enabled  
+- A Google AI Studio API Key for Gemini  
+
+### 2. Clone & Setup
 
 ```bash
 # Clone the repository
@@ -48,23 +46,191 @@ cd nutrilytics-backend
 # Install dependencies
 pip install -r requirements.txt
 ```
-### **3. Environment Setup**
-Download your service account key from the Firebase console, rename it to service-account.json, and place it in the project's root directory.
 
-Create a .env file in the root directory and add your project credentials:
+### 3. Environment Setup
 
-Sample .env file:
+- Download your service account key from the Firebase console, rename it to `service-account.json`, and place it in the project's root directory.
+- Create a `.env` file in the root directory and add your project credentials:
+
+#### Sample `.env` file:
+
 ```ini
 GOOGLE_APPLICATION_CREDENTIALS="service-account.json"
 FIREBASE_PROJECT_ID="your-firebase-project-id"
 GEMINI_API_KEY="your-google-ai-studio-api-key"
 ```
-### **4. Run the Server**
+
+### 4. Run the Server
+
 ```bash
 uvicorn app.main:app --reload
 ```
-The API will be available at http://127.0.0.1:8000.
 
-### **5 (Optional). Get a firebase token for testing**
-I have provided a get token tool in the dev_tools directory. This can be used to get a token for testing purposes.
-N.B. You must edit the code with your own firebase configuration and test login details!
+The API will be available at: [http://127.0.0.1:8000](http://127.0.0.1:8000)
+
+---
+
+## API Endpoints
+
+All v1 endpoints are prefixed with `/api/v1`.  
+Authentication is handled via Firebase ID tokens passed as a Bearer token in the `Authorization` header.
+
+---
+
+### Root
+
+**GET /**  
+_Description_: A welcome message to verify that the API is running.
+
+**Response 200 OK**
+
+```json
+{
+  "message": "Welcome to the Meal Tracker API"
+}
+```
+
+---
+
+### Authentication
+
+**Base path**: `/api/v1/auth`
+
+#### GET /api/v1/auth/me
+
+_Description_: Retrieves the profile of the currently authenticated user.
+
+**Response 200 OK**
+
+```json
+{
+  "uid": "user_firebase_uid",
+  "email": "user@example.com",
+  "name": "example"
+}
+```
+
+---
+
+### Meal Drafts
+
+**Base path**: `/api/v1/meal_drafts`
+
+#### POST /api/v1/meal_drafts/
+
+_Description_: Starts a background task to generate a meal from a user's description.
+
+**Status Code**: 202 ACCEPTED  
+**Request Body**
+
+```json
+{
+  "description": "A bowl of spaghetti bolognese"
+}
+```
+
+**Response 202 ACCEPTED**
+
+```json
+{
+  "draftId": "a_unique_draft_id"
+}
+```
+
+---
+
+#### GET /api/v1/meal_drafts/{draft_id}
+
+_Description_: Poll to check the status of a meal generation task.
+
+**Pending State Response**
+
+```json
+{
+  "status": "pending",
+  "user_id": "user_firebase_uid",
+  "meal": null
+}
+```
+
+**Complete State Response**
+
+```json
+{
+  "status": "complete",
+  "user_id": "user_firebase_uid",
+  "meal": {
+    "name": "Spaghetti Bolognese",
+    "calories": 600,
+    "protein": 30,
+    "carbohydrates": 70,
+    "fat": 20,
+    ...
+  }
+}
+```
+
+**Errors**:  
+- 403 Forbidden  
+- 404 Not Found  
+
+---
+
+#### DELETE /api/v1/meal_drafts/{draft_id}
+
+_Description_: Deletes a meal draft from the in-memory cache.
+
+**Status Code**: 204 NO CONTENT  
+**Errors**:  
+- 403 Forbidden  
+- 404 Not Found  
+
+---
+
+### Meals
+
+**Base path**: `/api/v1/meals`
+
+#### POST /api/v1/meals/
+
+_Description_: Promotes a completed meal draft to be saved in the Firestore database.
+
+**Status Code**: 201 CREATED  
+**Request Body**
+
+```json
+{
+  "draft_id": "the_completed_draft_id"
+}
+```
+
+**Response 201 CREATED**
+
+Returns the completed Meal, timestamp and Firestore ID.
+
+**Errors**:  
+- 403 Forbidden  
+- 404 Not Found  
+- 409 Conflict  
+
+---
+
+#### GET /api/v1/meals/{meal_id}
+
+_Description_: Retrieves a specific meal by its Firestore document ID.
+
+**Response 200 OK**
+
+Returns the requested Meal, timestamp and Firestore ID.
+
+**Errors**:  
+- 403 Forbidden  
+- 404 Not Found  
+
+---
+
+## Contact
+
+For any questions or contributions, please reach out via [GitHub Issues](https://github.com/TomMcKenna1/nutrilytics-backend/issues).
+
+---
