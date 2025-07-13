@@ -2,7 +2,9 @@
 
 This repository contains the backend server for **Nutrilytics**, a mobile application for logging meals and tracking nutrition. This API handles user authentication, meal data storage, and meal generation using **FastAPI** and **Google Firestore**.
 
-The API uses another one of my projects: the [meal-generator](https://github.com/TomMcKenna1/meal-generator) Python library. Check it out!
+The API also integrates with **Redis** for caching Firebase ID tokens and generated meal drafts, significantly improving performance and reducing redundant computation.
+
+It uses another one of my projects: the [meal-generator](https://github.com/TomMcKenna1/meal-generator) Python library. Check it out!
 
 ---
 
@@ -12,6 +14,7 @@ The API uses another one of my projects: the [meal-generator](https://github.com
 - **Meal Logging**: Full CRUD (Create, Read, Update, Delete) operations for user meals.  
 - **AI-Powered Meal Generation**: Asynchronously generate detailed meal nutritional profiles from simple text descriptions.  
 - **Secure Data Storage**: All user data is securely stored and tied to individual user accounts in Firestore.  
+- **Redis Caching**: Speeds up authentication checks and meal draft polling by caching Firebase tokens and in-progress meal generations.
 
 ---
 
@@ -20,6 +23,7 @@ The API uses another one of my projects: the [meal-generator](https://github.com
 - **Framework**: FastAPI  
 - **Database**: Google Firestore  
 - **Authentication**: Firebase Authentication  
+- **Caching**: Redis (for token validation and meal draft caching)  
 - **Server**: Uvicorn  
 - **Data Validation**: Pydantic  
 - **AI**: Google Gemini  
@@ -33,6 +37,7 @@ To get the project running locally, follow these steps:
 ### 1. Prerequisites
 
 - Python 3.8+  
+- Redis server running locally or remotely  
 - A Google Firebase project with Firestore and Authentication enabled  
 - A Google AI Studio API Key for Gemini  
 
@@ -58,6 +63,7 @@ pip install -r requirements.txt
 GOOGLE_APPLICATION_CREDENTIALS="service-account.json"
 FIREBASE_PROJECT_ID="your-firebase-project-id"
 GEMINI_API_KEY="your-google-ai-studio-api-key"
+REDIS_URL="redis://localhost:6379"  # or your hosted Redis URL
 ```
 
 ### 4. Run the Server
@@ -73,7 +79,8 @@ The API will be available at: [http://127.0.0.1:8000](http://127.0.0.1:8000)
 ## API Endpoints
 
 All v1 endpoints are prefixed with `/api/v1`.  
-Authentication is handled via Firebase ID tokens passed as a Bearer token in the `Authorization` header.
+Authentication is handled via Firebase ID tokens passed as a Bearer token in the `Authorization` header.  
+Redis is used internally to cache validated tokens and reduce the number of external verification requests.
 
 ---
 
@@ -98,7 +105,7 @@ _Description_: A welcome message to verify that the API is running.
 
 #### GET /api/v1/auth/me
 
-_Description_: Retrieves the profile of the currently authenticated user.
+_Description_: Retrieves the profile of the currently authenticated user. Validated Firebase tokens are cached in Redis to speed up future authentication.
 
 **Response 200 OK**
 
@@ -118,7 +125,7 @@ _Description_: Retrieves the profile of the currently authenticated user.
 
 #### POST /api/v1/meal_drafts/
 
-_Description_: Starts a background task to generate a meal from a user's description.
+_Description_: Starts a background task to generate a meal from a user's description. Results are cached in Redis and can be polled.
 
 **Status Code**: 202 ACCEPTED  
 **Request Body**
@@ -141,7 +148,7 @@ _Description_: Starts a background task to generate a meal from a user's descrip
 
 #### GET /api/v1/meal_drafts/{draft_id}
 
-_Description_: Poll to check the status of a meal generation task.
+_Description_: Poll to check the status of a meal generation task. Cached in Redis until complete.
 
 **Pending State Response**
 
@@ -178,7 +185,7 @@ _Description_: Poll to check the status of a meal generation task.
 
 #### DELETE /api/v1/meal_drafts/{draft_id}
 
-_Description_: Deletes a meal draft from the in-memory cache.
+_Description_: Deletes a meal draft from the Redis cache.
 
 **Status Code**: 204 NO CONTENT  
 **Errors**:  
