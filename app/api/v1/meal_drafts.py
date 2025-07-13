@@ -7,7 +7,7 @@ from redis.exceptions import RedisError
 
 from app.api.deps import get_current_user, get_redis_client
 from app.models.user import User
-from app.schemas.meal import MealDraft, MealGenerationRequest
+from app.schemas.meal import MealDraft, MealGenerationRequest, MealGenerationStatus
 from app.services import meal_generator
 from meal_generator import MealGenerationError
 
@@ -32,7 +32,7 @@ async def _generate_and_cache_meal(
 
         if draft_json:
             draft = MealDraft.model_validate_json(draft_json)
-            draft.status = "complete"
+            draft.status = MealGenerationStatus.COMPLETE
             draft.meal = generated_meal.to_pydantic()
             await redis_client.set(draft_id, draft.model_dump_json())
             logger.info(
@@ -51,7 +51,7 @@ async def _generate_and_cache_meal(
             draft_json = await redis_client.get(draft_id)
             if draft_json:
                 draft = MealDraft.model_validate_json(draft_json)
-                draft.status = "error"
+                draft.status = MealGenerationStatus.ERROR
                 await redis_client.set(draft_id, draft.model_dump_json())
         except RedisError as redis_err:
             logger.error(
@@ -77,7 +77,7 @@ async def create_meal_draft(
     draft_id = str(uuid.uuid4())
     logger.info(f"User '{current_user.uid}' creating meal draft '{draft_id}'.")
 
-    draft = MealDraft(status="pending", uid=current_user.uid, meal=None)
+    draft = MealDraft(status=MealGenerationStatus.PENDING, uid=current_user.uid, meal=None)
     try:
         await redis_client.set(draft_id, draft.model_dump_json())
     except RedisError as e:

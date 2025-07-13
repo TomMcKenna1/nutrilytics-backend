@@ -7,7 +7,7 @@ from firebase_admin import firestore
 from app.api.deps import get_current_user, get_redis_client
 from app.db.firebase import get_firestore_client
 from app.models.user import User
-from app.schemas.meal import MealDraft, MealResponse, MealSaveFromDraftRequest
+from app.schemas.meal import MealDraft, MealGenerationStatus, MealResponse, MealSaveFromDraftRequest
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -59,7 +59,7 @@ async def save_meal_from_draft(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Not authorized to access this draft.",
         )
-    if draft.status != "complete" or not draft.meal:
+    if draft.status != MealGenerationStatus.COMPLETE or not draft.meal:
         logger.warning(f"Draft '{draft_id}' is not complete and cannot be saved.")
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,

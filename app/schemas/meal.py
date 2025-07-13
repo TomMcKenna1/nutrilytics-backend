@@ -1,9 +1,14 @@
 from datetime import datetime
+import enum
 from typing import Optional
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic.alias_generators import to_camel
 from meal_generator.models import Meal
 
+class MealGenerationStatus(enum.Enum):
+    PENDING = "pending"
+    COMPLETE = "complete"
+    ERROR = "error"
 
 class MealGenerationRequest(BaseModel):
     """Request body to generate a new meal draft."""
@@ -14,7 +19,7 @@ class MealGenerationRequest(BaseModel):
 class MealDraft(BaseModel):
     """Schema for the draft stored in our cache and returned to the user."""
 
-    status: str
+    status: MealGenerationStatus
     uid: str
     meal: Optional[Meal] = None
 
