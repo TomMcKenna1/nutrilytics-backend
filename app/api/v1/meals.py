@@ -7,19 +7,21 @@ from firebase_admin import firestore
 from app.api.deps import get_current_user, get_redis_client
 from app.db.firebase import get_firestore_client
 from app.models.user import User
-from app.schemas.meal import MealDraft, MealGenerationStatus, MealResponse, MealSaveFromDraftRequest
+from app.schemas.meal_request import MealSaveFromDraftRequest
+from app.models.meal_draft import MealGenerationStatus, MealDraft
+from app.models.meal import Meal
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-@router.post("/", status_code=status.HTTP_201_CREATED, response_model=MealResponse)
+@router.post("/", status_code=status.HTTP_201_CREATED, response_model=Meal)
 async def save_meal_from_draft(
     request: MealSaveFromDraftRequest,
     current_user: User = Depends(get_current_user),
     db: BaseClient = Depends(get_firestore_client),
     redis_client: redis.Redis = Depends(get_redis_client),
-) -> MealResponse:
+) -> Meal:
     """
     Saves a new meal by validating and promoting a completed meal draft
     from Redis to a permanent record in Firestore.
@@ -81,7 +83,7 @@ async def save_meal_from_draft(
         logger.info(f"Successfully deleted draft '{draft_id}' from Redis.")
 
         new_meal_doc = doc_ref.get()
-        return MealResponse(id=new_meal_doc.id, **new_meal_doc.to_dict())
+        return Meal(id=new_meal_doc.id, **new_meal_doc.to_dict())
 
     except Exception as e:
         logger.error(
@@ -94,12 +96,12 @@ async def save_meal_from_draft(
         )
 
 
-@router.get("/{meal_id}", response_model=MealResponse)
+@router.get("/{meal_id}", response_model=Meal)
 async def get_meal_by_id(
     meal_id: str,
     current_user: User = Depends(get_current_user),
     db: BaseClient = Depends(get_firestore_client),
-) -> MealResponse:
+) -> Meal:
     """
     Retrieves a specific meal by its ID from Firestore, checking for ownership.
     """
@@ -136,4 +138,4 @@ async def get_meal_by_id(
     logger.info(
         f"Successfully retrieved meal '{meal_id}' for user '{current_user.uid}'."
     )
-    return MealResponse(id=meal_doc.id, **meal_data)
+    return Meal(id=meal_doc.id, **meal_data)

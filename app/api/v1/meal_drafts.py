@@ -7,7 +7,8 @@ from redis.exceptions import RedisError
 
 from app.api.deps import get_current_user, get_redis_client
 from app.models.user import User
-from app.schemas.meal import MealDraft, MealGenerationRequest, MealGenerationStatus
+from app.schemas.meal_request import MealGenerationRequest
+from app.models.meal_draft import MealDraft, MealGenerationStatus
 from app.services import meal_generator
 from meal_generator import MealGenerationError
 
