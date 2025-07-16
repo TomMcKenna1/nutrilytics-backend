@@ -67,7 +67,7 @@ async def get_current_user(
         logger.warning(f"Invalid authentication attempt: {e}")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=f"Invalid or expired token: {e}",
+            detail=f"Invalid or expired token",
         )
     except Exception as e:
         logger.error(f"An unexpected error occurred during authentication: {e}", exc_info=True)
