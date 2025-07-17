@@ -1,5 +1,5 @@
 import firebase_admin
-from firebase_admin import credentials, firestore, auth
+from firebase_admin import credentials, firestore_async, auth
 from app.core.config import settings
 
 
@@ -23,7 +23,7 @@ def get_firestore_client():
     """
     Returns a Firestore client.
     """
-    return firestore.client()
+    return firestore_async.client()
 
 
 def get_firebase_auth():
