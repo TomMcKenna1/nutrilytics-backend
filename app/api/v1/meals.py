@@ -12,7 +12,7 @@ from firebase_admin import firestore
 
 from app.api.deps import get_current_user, get_redis_client
 from app.db.firebase import get_firestore_client
-from app.models.meal import Meal
+from app.models.meal_response import MealResponse
 from app.models.meal_draft import MealDraft, MealGenerationStatus
 from app.models.user import User
 from app.schemas.meal_request import MealListResponse, MealSaveFromDraftRequest
@@ -21,13 +21,13 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-@router.post("/", status_code=status.HTTP_201_CREATED, response_model=Meal)
+@router.post("/", status_code=status.HTTP_201_CREATED, response_model=MealResponse)
 async def save_meal_from_draft(
     request: MealSaveFromDraftRequest,
     current_user: User = Depends(get_current_user),
     db: AsyncClient = Depends(get_firestore_client),
     redis_client: redis.Redis = Depends(get_redis_client),
-) -> Meal:
+) -> MealResponse:
     """
     Saves a new meal by validating and promoting a completed meal draft
     from Redis to a permanent record in Firestore.
@@ -138,7 +138,7 @@ async def save_meal_from_draft(
     # Return meal
     try:
         new_meal_doc = await doc_ref.get()
-        return Meal(id=new_meal_doc.id, **new_meal_doc.to_dict())
+        return MealResponse(id=new_meal_doc.id, **new_meal_doc.to_dict())
     except (google_exceptions.GoogleAPICallError, google_exceptions.RetryError) as e:
         logger.error(f"Failed to fetch newly created meal '{doc_ref.id}': {e}", exc_info=True)
         raise HTTPException(
@@ -159,7 +159,7 @@ async def get_meals_async(
         None, description="Sort order. Use 'latest' to get the most recent meals."
     ),
     limit: int = Query(10, ge=1, le=20, description="Number of meals to return per page."),
-    start_after_id: Optional[str] = Query(
+    next: Optional[str] = Query(
         None, description="The document ID of the last meal from the previous page."
     ),
     user: User = Depends(get_current_user),
@@ -172,7 +172,7 @@ async def get_meals_async(
             detail="Unsupported query. Please use '?sort=latest' to fetch the latest meals.",
         )
 
-    start_key = start_after_id if start_after_id else "first"
+    start_key = next if next else "first"
     cache_key = f"latest_meals_v5:{user.uid}:{limit}:{start_key}"
 
     # Check cache
@@ -196,13 +196,13 @@ async def get_meals_async(
             .order_by("__name__", direction=FirestoreQuery.DESCENDING)
         )
 
-        if start_after_id:
-            if last_doc_snapshot := await meals_collection.document(start_after_id).get():
+        if next:
+            if last_doc_snapshot := await meals_collection.document(next).get():
                 query = query.start_after(last_doc_snapshot)
             else:
                 raise HTTPException(
                     status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                    detail="Invalid 'start_after_id'. Document not found.",
+                    detail="Invalid 'next'. Document not found.",
                 )
 
         docs = [doc async for doc in query.limit(limit).stream()]
@@ -228,12 +228,12 @@ async def get_meals_async(
     return final_response
 
 
-@router.get("/{meal_id}", response_model=Meal)
+@router.get("/{meal_id}", response_model=MealResponse)
 async def get_meal_by_id(
     meal_id: str,
     current_user: User = Depends(get_current_user),
     db: AsyncClient = Depends(get_firestore_client),
-) -> Meal:
+) -> MealResponse:
     """
     Retrieves a specific meal by its ID from Firestore, checking for ownership.
     """
@@ -270,4 +270,5 @@ async def get_meal_by_id(
     logger.info(
         f"Successfully retrieved meal '{meal_id}' for user '{current_user.uid}'."
     )
-    return Meal(id=meal_doc.id, **meal_data)
+    print(meal_doc.id)
+    return MealResponse(id=meal_doc.id, **meal_data)

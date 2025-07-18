@@ -4,6 +4,7 @@ from pydantic import ConfigDict
 from pydantic.alias_generators import to_camel
 
 class MealResponse(Meal):
+    id: str
     uid: str
     created_at: datetime
 
