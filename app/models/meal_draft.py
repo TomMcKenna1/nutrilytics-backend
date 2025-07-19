@@ -1,9 +1,10 @@
 import enum
 from typing import Optional
 
-from meal_generator.models import Meal
 from pydantic import BaseModel, ConfigDict
 from pydantic.alias_generators import to_camel
+
+from app.models.meal import MealComponentDB, NutrientProfileDB
 
 
 class MealGenerationStatus(enum.Enum):
@@ -11,11 +12,17 @@ class MealGenerationStatus(enum.Enum):
     COMPLETE = "complete"
     ERROR = "error"
 
-
 class MealDraft(BaseModel):
-    status: MealGenerationStatus
+    name: str
+    description: str
+    nutrient_profile: NutrientProfileDB
+    components: list[MealComponentDB]
+
+class MealDraftDB(BaseModel):
+    id: str
     uid: str
-    meal: Optional[Meal] = None
+    status: MealGenerationStatus
+    meal_draft: Optional[MealDraft] = None
 
     model_config = ConfigDict(
         alias_generator=to_camel,

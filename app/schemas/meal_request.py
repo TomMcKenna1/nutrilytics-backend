@@ -1,7 +1,7 @@
 from typing import List, Optional
 from pydantic import BaseModel, Field
 
-from app.models.meal_response import MealResponse
+from app.models.meal import MealDB
 
 class MealGenerationRequest(BaseModel):
     """Request body to generate a new meal draft."""
@@ -21,7 +21,7 @@ class MealListResponse(BaseModel):
     """
     Defines the response structure for the latest meals endpoint.
     """
-    meals: List[MealResponse] = Field(..., description="A list of the retrieved meals.")
+    meals: List[MealDB] = Field(..., description="A list of the retrieved meals.")
     next: Optional[str] = Field(
         None,
         description="The document ID for the next page of results. Null if this is the last page.",
