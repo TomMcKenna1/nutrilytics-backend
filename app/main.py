@@ -5,7 +5,7 @@ import redis.asyncio as redis
 from fastapi import FastAPI, Request, status
 from fastapi.responses import JSONResponse
 
-from app.api.v1 import auth as auth_v1, meal_drafts, meals
+from app.api.v1 import auth as auth_v1, meal_drafts, meals, metrics
 from app.core.config import settings
 from app.db.firebase import initialize_firebase
 
@@ -68,6 +68,7 @@ app.include_router(
     meal_drafts.router, prefix="/api/v1/meal_drafts", tags=["meal_drafts"]
 )
 app.include_router(meals.router, prefix="/api/v1/meals", tags=["meals"])
+app.include_router(metrics.router, prefix="/api/v1/metrics", tags=["metrics"])
 
 
 @app.get("/", tags=["Root"])
