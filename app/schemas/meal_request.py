@@ -3,6 +3,7 @@ from pydantic import BaseModel, Field
 
 from app.models.meal import MealDB
 
+
 class MealGenerationRequest(BaseModel):
     """Request body to generate a new meal draft."""
 
@@ -17,13 +18,15 @@ class MealSaveFromDraftRequest(BaseModel):
 
     draft_id: str = Field(..., alias="draftId")
 
+
 class MealListResponse(BaseModel):
     """
     Defines the response structure for the latest meals endpoint.
     """
+
     meals: List[MealDB] = Field(..., description="A list of the retrieved meals.")
     next: Optional[str] = Field(
         None,
         description="The document ID for the next page of results. Null if this is the last page.",
-        example="aBcDeFg12345"
+        example="aBcDeFg12345",
     )

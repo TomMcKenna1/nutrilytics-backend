@@ -12,11 +12,18 @@ class MealGenerationStatus(enum.Enum):
     COMPLETE = "complete"
     ERROR = "error"
 
+
 class MealDraft(BaseModel):
     name: str
     description: str
     nutrient_profile: NutrientProfileDB
     components: list[MealComponentDB]
+
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True,
+    )
+
 
 class MealDraftDB(BaseModel):
     id: str

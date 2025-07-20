@@ -5,10 +5,6 @@ from pydantic.alias_generators import to_camel
 
 
 class NutrientProfileDB(BaseModel):
-    model_config = ConfigDict(
-        alias_generator=to_camel,
-        populate_by_name=True,
-    )
 
     energy: float
     fats: float
@@ -33,13 +29,13 @@ class NutrientProfileDB(BaseModel):
     is_processed: bool = False
     is_ultra_processed: bool = False
 
-
-class MealComponentDB(BaseModel):
     model_config = ConfigDict(
         alias_generator=to_camel,
         populate_by_name=True,
     )
 
+
+class MealComponentDB(BaseModel):
     id: str
     name: str
     brand: Optional[str]
@@ -47,13 +43,19 @@ class MealComponentDB(BaseModel):
     total_weight: float
     nutrient_profile: NutrientProfileDB
 
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True,
+    )
+
 
 class MealBase(BaseModel):
-    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
     name: str
     description: str
     nutrient_profile: NutrientProfileDB
     components: list[MealComponentDB]
+
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
 
 class MealCreate(MealBase):

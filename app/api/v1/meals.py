@@ -21,7 +21,12 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-@router.post("/", status_code=status.HTTP_201_CREATED, response_model=MealDB)
+@router.post(
+    "/",
+    status_code=status.HTTP_201_CREATED,
+    response_model=MealDB,
+    response_model_by_alias=True,
+)
 async def save_meal_from_draft(
     request: MealSaveFromDraftRequest,
     current_user: User = Depends(get_current_user),
@@ -49,26 +54,34 @@ async def save_meal_from_draft(
         draft = MealDraftDB.model_validate_json(draft_json)
     except redis.RedisError as e:
         logger.error(f"Redis error fetching draft '{draft_id}': {e}", exc_info=True)
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="A cache server error occurred.")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="A cache server error occurred.",
+        )
     except ValidationError as e:
         logger.error(
             f"Draft '{draft_id}' has invalid format in Redis: {e}", exc_info=True
         )
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Could not read draft data.")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Could not read draft data.",
+        )
     if draft.uid != current_user.uid:
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN, detail="Not authorised to access this draft."
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Not authorised to access this draft.",
         )
     if draft.status != MealGenerationStatus.COMPLETE or not draft.meal_draft:
         raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT, detail="Draft is not complete and cannot be saved."
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Draft is not complete and cannot be saved.",
         )
     try:
         meal_to_create = MealCreate(**draft.meal_draft.model_dump())
     except ValidationError as e:
         logger.error(f"Draft '{draft_id}' data failed validation for MealCreate: {e}")
         raise HTTPException(status_code=500, detail="Invalid meal data in draft.")
-    
+
     meals_collection = db.collection("meals")
     doc_ref = meals_collection.document()
 
@@ -77,7 +90,6 @@ async def save_meal_from_draft(
     data_to_save["uid"] = current_user.uid
     data_to_save["createdAt"] = firestore.SERVER_TIMESTAMP
 
-    
     try:
         await doc_ref.set(data_to_save)
         logger.info(f"Saved meal '{doc_ref.id}' for user '{current_user.uid}'.")
@@ -87,7 +99,10 @@ async def save_meal_from_draft(
         logger.error(
             f"Firestore error saving meal from draft '{draft_id}': {e}", exc_info=True
         )
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Database error while saving meal.")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Database error while saving meal.",
+        )
     except redis.RedisError as e:
         logger.critical(
             f"CRITICAL: Failed to delete draft '{draft_id}' after saving meal '{doc_ref.id}'. Manual cleanup required. Error: {e}",
@@ -114,14 +129,20 @@ async def save_meal_from_draft(
         new_meal_doc = await doc_ref.get()
         return MealDB(**new_meal_doc.to_dict())
     except (google_exceptions.GoogleAPICallError, google_exceptions.RetryError) as e:
-        logger.error(f"Failed to fetch newly created meal '{doc_ref.id}': {e}", exc_info=True)
+        logger.error(
+            f"Failed to fetch newly created meal '{doc_ref.id}': {e}", exc_info=True
+        )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Meal was saved, but could not be retrieved.",
         )
 
 
-@router.get("/", response_model=MealListResponse)
+@router.get(
+    "/",
+    response_model=MealListResponse,
+    response_model_by_alias=True,
+)
 async def get_meals_list(
     response: Response,
     limit: int = Query(10, ge=1, le=20),
@@ -156,7 +177,10 @@ async def get_meals_list(
         if next:
             last_doc = await meals_ref.document(next).get()
             if not last_doc.exists:
-                raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Invalid 'next' cursor.")
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail="Invalid 'next' cursor.",
+                )
             query = query.start_after(last_doc)
 
         docs = await query.limit(limit).get()
@@ -164,7 +188,10 @@ async def get_meals_list(
         logger.error(
             f"Firestore query failed for user '{user.uid}': {e}", exc_info=True
         )
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Database error fetching meals.")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Database error fetching meals.",
+        )
 
     meals_list = [MealDB(**doc.to_dict()) for doc in docs]
 
@@ -179,7 +206,11 @@ async def get_meals_list(
     return final_response
 
 
-@router.get("/{meal_id}", response_model=MealDB)
+@router.get(
+    "/{meal_id}",
+    response_model=MealDB,
+    response_model_by_alias=True,
+)
 async def get_meal_by_id(
     meal_id: str,
     current_user: User = Depends(get_current_user),
@@ -194,19 +225,28 @@ async def get_meal_by_id(
         meal_doc = await doc_ref.get()
     except (google_exceptions.GoogleAPICallError, google_exceptions.RetryError) as e:
         logger.error(f"Firestore error fetching meal '{meal_id}': {e}", exc_info=True)
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Database error fetching the meal.")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Database error fetching the meal.",
+        )
 
     if not meal_doc.exists:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Meal not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Meal not found"
+        )
 
     meal_data = meal_doc.to_dict()
     if meal_data.get("uid") != current_user.uid:
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to access this meal"
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Not authorized to access this meal",
         )
 
     try:
         return MealDB(**meal_data)
     except ValidationError as e:
         logger.error(f"Meal '{meal_id}' has invalid format in DB: {e}", exc_info=True)
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Could not read meal data.")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Could not read meal data.",
+        )

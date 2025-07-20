@@ -45,7 +45,9 @@ async def get_current_user(
             logger.debug("Authentication cache hit for user.")
             return User.model_validate_json(cached_user_json)
     except RedisError as e:
-        logger.error(f"Redis error during auth cache lookup: {e}. Proceeding without cache.")
+        logger.error(
+            f"Redis error during auth cache lookup: {e}. Proceeding without cache."
+        )
 
     logger.debug("Authentication cache miss. Verifying token with Firebase.")
     try:
@@ -55,7 +57,7 @@ async def get_current_user(
             email=decoded_token.get("email"),
             name=decoded_token.get("name"),
         )
-        
+
         try:
             await redis_client.set(cache_key, user.model_dump_json(), ex=3600)
         except RedisError as e:
@@ -63,14 +65,20 @@ async def get_current_user(
 
         return user
 
-    except (auth.InvalidIdTokenError, auth.ExpiredIdTokenError, auth.RevokedIdTokenError) as e:
+    except (
+        auth.InvalidIdTokenError,
+        auth.ExpiredIdTokenError,
+        auth.RevokedIdTokenError,
+    ) as e:
         logger.warning(f"Invalid authentication attempt: {e}")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=f"Invalid or expired token",
         )
     except Exception as e:
-        logger.error(f"An unexpected error occurred during authentication: {e}", exc_info=True)
+        logger.error(
+            f"An unexpected error occurred during authentication: {e}", exc_info=True
+        )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="An internal error occurred during authentication.",

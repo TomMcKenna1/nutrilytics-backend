@@ -18,6 +18,7 @@ from app.services import meal_generator
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
+
 def _convert_meal_to_draft_schema(generated_meal: GeneratedMeal) -> MealDraft:
     """
     Converts a meal object from the generation module into a MealDraft Pydantic model.
@@ -66,17 +67,23 @@ async def _generate_and_cache_meal(
         meal_draft_data = _convert_meal_to_draft_schema(generated_meal_object)
         draft.status = MealGenerationStatus.COMPLETE
         draft.meal_draft = meal_draft_data
-        await redis_client.set(f"meal_draft:{draft_id}", draft.model_dump_json(by_alias=True))
+        await redis_client.set(
+            f"meal_draft:{draft_id}", draft.model_dump_json(by_alias=True)
+        )
         logger.info(f"Successfully finished meal generation for draft '{draft_id}'.")
 
     except MealGenerationError as e:
-        logger.error(f"Meal generation failed for draft '{draft_id}': {e}", exc_info=True)
+        logger.error(
+            f"Meal generation failed for draft '{draft_id}': {e}", exc_info=True
+        )
         try:
             draft_json = await redis_client.get(f"meal_draft:{draft_id}")
             if draft_json:
                 draft = MealDraftDB.model_validate_json(draft_json)
                 draft.status = MealGenerationStatus.ERROR
-                await redis_client.set(f"meal_draft:{draft_id}", draft.model_dump_json(by_alias=True))
+                await redis_client.set(
+                    f"meal_draft:{draft_id}", draft.model_dump_json(by_alias=True)
+                )
         except RedisError as redis_err:
             logger.error(
                 f"Redis error while setting draft '{draft_id}' to 'error' status: {redis_err}"
@@ -88,7 +95,12 @@ async def _generate_and_cache_meal(
         )
 
 
-@router.post("/", status_code=status.HTTP_202_ACCEPTED, response_model=MealSaveFromDraftRequest)
+@router.post(
+    "/",
+    status_code=status.HTTP_202_ACCEPTED,
+    response_model=MealSaveFromDraftRequest,
+    response_model_by_alias=True,
+)
 async def create_meal_draft(
     request: MealGenerationRequest,
     background_tasks: BackgroundTasks,
@@ -107,7 +119,9 @@ async def create_meal_draft(
         meal_draft=None,
     )
     try:
-        await redis_client.set(f"meal_draft:{draft_id}", draft.model_dump_json(by_alias=True))
+        await redis_client.set(
+            f"meal_draft:{draft_id}", draft.model_dump_json(by_alias=True)
+        )
     except RedisError as e:
         logger.error(
             f"Redis error on create_meal_draft for user '{current_user.uid}': {e}",
@@ -127,7 +141,11 @@ async def create_meal_draft(
     return {"draftId": draft_id}
 
 
-@router.get("/{draft_id}", response_model=MealDraftDB)
+@router.get(
+    "/{draft_id}",
+    response_model=MealDraftDB,
+    response_model_by_alias=True,
+)
 async def get_meal_draft(
     draft_id: str,
     current_user: User = Depends(get_current_user),
