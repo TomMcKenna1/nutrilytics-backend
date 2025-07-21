@@ -13,7 +13,7 @@ from pydantic import ValidationError
 from app.api.deps import get_current_user, get_redis_client
 from app.db.firebase import get_firestore_client
 from app.models.meal import MealCreate, MealDB
-from app.models.meal_draft import MealDraftDB, MealGenerationStatus
+from app.models.meal_draft import Draft, MealGenerationStatus
 from app.models.user import User
 from app.schemas.meal_request import MealListResponse, MealSaveFromDraftRequest
 
@@ -51,7 +51,7 @@ async def save_meal_from_draft(
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND, detail="Draft not found."
             )
-        draft = MealDraftDB.model_validate_json(draft_json)
+        draft = Draft.model_validate_json(draft_json)
     except redis.RedisError as e:
         logger.error(f"Redis error fetching draft '{draft_id}': {e}", exc_info=True)
         raise HTTPException(
@@ -88,6 +88,7 @@ async def save_meal_from_draft(
     data_to_save = meal_to_create.model_dump(by_alias=True)
     data_to_save["id"] = doc_ref.id
     data_to_save["uid"] = current_user.uid
+    data_to_save["submittedAt"] = draft.created_at
     data_to_save["createdAt"] = firestore.SERVER_TIMESTAMP
 
     try:

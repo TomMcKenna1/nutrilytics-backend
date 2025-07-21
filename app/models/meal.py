@@ -65,4 +65,5 @@ class MealCreate(MealBase):
 class MealDB(MealBase):
     id: str
     uid: str
+    submitted_at: datetime
     created_at: datetime
