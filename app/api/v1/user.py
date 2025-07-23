@@ -31,7 +31,7 @@ async def set_user_nutrition_targets(
     unchanged in the database.
     """
     logger.info(f"User '{current_user.uid}' attempting to set nutrition targets.")
-    targets_to_update = targets.model_dump(exclude_unset=True)
+    targets_to_update = targets.model_dump(exclude_unset=True, by_alias=True)
 
     if not targets_to_update:
         raise HTTPException(

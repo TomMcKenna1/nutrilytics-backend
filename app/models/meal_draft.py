@@ -12,6 +12,7 @@ class MealGenerationStatus(enum.Enum):
     PENDING = "pending"
     COMPLETE = "complete"
     ERROR = "error"
+    PENDING_EDIT = "pending_edit"
 
 
 class MealDraft(BaseModel):

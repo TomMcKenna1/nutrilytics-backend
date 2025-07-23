@@ -5,6 +5,7 @@ from typing import List
 
 import redis.asyncio as redis
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
+from pydantic import BaseModel
 from redis.exceptions import RedisError
 
 from app.api.deps import get_current_user, get_redis_client
@@ -14,11 +15,48 @@ from app.models.meal_draft import Draft, MealDraft, MealGenerationStatus
 from app.models.meal import MealComponentDB, NutrientProfileDB
 
 from meal_generator import MealGenerationError
-from meal_generator.meal import Meal as GeneratedMeal
+from meal_generator.meal import Meal as GeneratedMeal, ComponentDoesNotExist
+from meal_generator.meal_component import MealComponent
+from meal_generator.nutrient_profile import NutrientProfile
 from app.services import meal_generator
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+
+class AddComponentRequest(BaseModel):
+    """Request model for adding a new component to a draft."""
+    description: str
+
+
+def _convert_draft_to_generated_meal(draft_data: MealDraft) -> GeneratedMeal:
+    """
+    Converts a MealDraft Pydantic model from the cache into a business logic Meal object.
+    This allows for using the business logic methods like adding or removing components.
+    """
+
+    def convert_nutrient_profile(np_db: NutrientProfileDB) -> NutrientProfile:
+        return NutrientProfile(**np_db.model_dump())
+
+    components = []
+    for comp_db in draft_data.components:
+        component = MealComponent(
+            name=comp_db.name,
+            quantity=comp_db.quantity,
+            total_weight=comp_db.total_weight,
+            nutrient_profile=convert_nutrient_profile(comp_db.nutrient_profile),
+            brand=comp_db.brand,
+        )
+        # Preserve the original ID from the draft
+        component.id = uuid.UUID(comp_db.id)
+        components.append(component)
+
+    meal = GeneratedMeal(
+        name=draft_data.name,
+        description=draft_data.description,
+        component_list=components,
+    )
+    return meal
 
 
 def _convert_meal_to_draft_schema(generated_meal: GeneratedMeal) -> MealDraft:
@@ -96,6 +134,67 @@ async def _generate_and_cache_meal(
     except RedisError as e:
         logger.error(
             f"Redis error during meal generation task for draft '{draft_id}': {e}"
+        )
+
+
+async def _add_component_and_update_cache(
+    redis_client: redis.Redis, draft_id: str, description: str
+):
+    """
+    Generates a new component and adds it to an existing draft in the background.
+    """
+    logger.info(f"Starting background component addition for draft '{draft_id}'.")
+    try:
+        draft_json = await redis_client.get(f"meal_draft:{draft_id}")
+        if not draft_json:
+            logger.warning(
+                f"Draft '{draft_id}' was deleted before component addition could complete."
+            )
+            return
+
+        draft = Draft.model_validate_json(draft_json)
+        if not draft.meal_draft:
+            raise MealGenerationError(
+                "Cannot add component, meal data is missing from draft."
+            )
+
+        generated_meal = _convert_draft_to_generated_meal(draft.meal_draft)
+        await generated_meal.add_component_from_string_async(
+            description, meal_generator.get_meal_generator()
+        )
+
+        updated_meal_draft_data = _convert_meal_to_draft_schema(generated_meal)
+        draft.meal_draft = updated_meal_draft_data
+        draft.status = MealGenerationStatus.COMPLETE
+        draft.error = None
+
+        await redis_client.set(
+            f"meal_draft:{draft_id}", draft.model_dump_json(by_alias=True)
+        )
+        logger.info(
+            f"Successfully finished component addition for draft '{draft_id}'."
+        )
+
+    except MealGenerationError as e:
+        logger.error(
+            f"Component generation failed for draft '{draft_id}': {e}", exc_info=True
+        )
+        try:
+            draft_json = await redis_client.get(f"meal_draft:{draft_id}")
+            if draft_json:
+                draft = Draft.model_validate_json(draft_json)
+                draft.status = MealGenerationStatus.ERROR
+                draft.error = str(e)
+                await redis_client.set(
+                    f"meal_draft:{draft_id}", draft.model_dump_json(by_alias=True)
+                )
+        except RedisError as redis_err:
+            logger.error(
+                f"Redis error setting draft '{draft_id}' to 'error' after failed component add: {redis_err}"
+            )
+    except RedisError as e:
+        logger.error(
+            f"Redis error during component addition task for draft '{draft_id}': {e}"
         )
 
 
@@ -228,6 +327,174 @@ async def get_meal_draft(
             detail="Not authorized to access this draft",
         )
     return draft
+
+
+@router.post(
+    "/{draft_id}/components",
+    status_code=status.HTTP_202_ACCEPTED,
+    response_model=Draft,
+    response_model_by_alias=True,
+)
+async def add_component_to_draft(
+    draft_id: str,
+    request: AddComponentRequest,
+    background_tasks: BackgroundTasks,
+    current_user: User = Depends(get_current_user),
+    redis_client: redis.Redis = Depends(get_redis_client),
+):
+    """
+    Accepts a request to add a new component to a meal draft. The draft status
+    is immediately set to 'pending_edit', and the update happens in the background.
+    """
+    logger.info(
+        f"User '{current_user.uid}' queuing component addition to draft '{draft_id}'."
+    )
+    try:
+        draft_json = await redis_client.get(f"meal_draft:{draft_id}")
+    except RedisError as e:
+        logger.error(
+            f"Redis error fetching draft '{draft_id}' for component addition: {e}",
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Database error."
+        )
+
+    if not draft_json:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Draft not found"
+        )
+
+    draft = Draft.model_validate_json(draft_json)
+
+    if draft.uid != current_user.uid:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Not authorized to access this draft",
+        )
+
+    if draft.status not in [MealGenerationStatus.COMPLETE, MealGenerationStatus.ERROR]:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Draft must be in a 'complete' or 'error' state for modification. Current state: {draft.status.value}",
+        )
+
+    if not draft.meal_draft:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Meal data not found in draft, cannot add component.",
+        )
+
+    draft.status = MealGenerationStatus.PENDING_EDIT
+    try:
+        await redis_client.set(
+            f"meal_draft:{draft_id}", draft.model_dump_json(by_alias=True)
+        )
+    except RedisError as e:
+        logger.error(
+            f"Redis error updating draft '{draft_id}' to pending_edit: {e}",
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database error while updating draft status.",
+        )
+
+    background_tasks.add_task(
+        _add_component_and_update_cache,
+        redis_client,
+        draft_id,
+        request.description,
+    )
+
+    return draft
+
+
+@router.delete("/{draft_id}/components/{component_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def remove_component_from_draft(
+    draft_id: str,
+    component_id: str,
+    current_user: User = Depends(get_current_user),
+    redis_client: redis.Redis = Depends(get_redis_client),
+):
+    """
+    Removes a component from a meal draft by its ID.
+    The meal's nutrients are recalculated and the draft is updated.
+    """
+    logger.info(
+        f"User '{current_user.uid}' attempting to remove component "
+        f"'{component_id}' from draft '{draft_id}'."
+    )
+    try:
+        draft_json = await redis_client.get(f"meal_draft:{draft_id}")
+    except RedisError as e:
+        logger.error(
+            f"Redis error fetching draft '{draft_id}' for component removal: {e}",
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Database error."
+        )
+
+    if not draft_json:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Draft not found"
+        )
+
+    draft = Draft.model_validate_json(draft_json)
+
+    if draft.uid != current_user.uid:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Not authorized to access this draft",
+        )
+
+    if draft.status not in [MealGenerationStatus.COMPLETE, MealGenerationStatus.ERROR]:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Draft is not in a complete or error state for modification.",
+        )
+
+    if not draft.meal_draft:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Meal data not found in draft."
+        )
+
+    generated_meal = _convert_draft_to_generated_meal(draft.meal_draft)
+
+    try:
+        component_uuid = uuid.UUID(component_id)
+        generated_meal.remove_component(component_uuid)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid component ID format."
+        )
+    except ComponentDoesNotExist:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Component not found in draft."
+        )
+
+    updated_meal_draft_data = _convert_meal_to_draft_schema(generated_meal)
+    draft.meal_draft = updated_meal_draft_data
+    # If we are removing a component, the result is considered complete
+    draft.status = MealGenerationStatus.COMPLETE
+    draft.error = None
+
+    try:
+        await redis_client.set(
+            f"meal_draft:{draft_id}", draft.model_dump_json(by_alias=True)
+        )
+    except RedisError as e:
+        logger.error(
+            f"Redis error on remove_component_from_draft for draft '{draft_id}': {e}",
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database error on update.",
+        )
+
+    logger.info(f"Successfully removed component '{component_id}' from draft '{draft_id}'.")
 
 
 @router.delete("/{draft_id}", status_code=status.HTTP_204_NO_CONTENT)
