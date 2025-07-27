@@ -5,24 +5,19 @@ from app.models.meal import MealDB
 
 
 class MealGenerationRequest(BaseModel):
-    """Request body to generate a new meal draft."""
+    """Request body to generate a new meal."""
 
     description: str
 
 
-class MealSaveFromDraftRequest(BaseModel):
-    """
-    Schema for the request body when creating a permanent meal
-    from an existing draft.
-    """
+class AddComponentRequest(BaseModel):
+    """Request model for adding a new component to a meal."""
 
-    draft_id: str = Field(..., alias="draftId")
+    description: str
 
 
 class MealListResponse(BaseModel):
-    """
-    Defines the response structure for the latest meals endpoint.
-    """
+    """Defines the response structure for the latest meals endpoint."""
 
     meals: List[MealDB] = Field(..., description="A list of the retrieved meals.")
     next: Optional[str] = Field(

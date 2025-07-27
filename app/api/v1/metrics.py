@@ -9,7 +9,7 @@ from pydantic import ValidationError
 
 from app.api.deps import get_current_user
 from app.db.firebase import get_firestore_client
-from app.models.meal import MealDB
+from app.models.meal import MealDB, MealGenerationStatus
 from app.models.user import User
 from app.schemas.daily_summary import DailySummary
 from meal_generator import NutrientProfile, MealType
@@ -24,9 +24,10 @@ router = APIRouter()
     response_model_by_alias=True,
 )
 async def get_daily_nutrition_summary(
-    date: date = Query(
+    request_date: date = Query(
         None,
         description="The date for the summary in YYYY-MM-DD format. Defaults to today (UTC).",
+        alias="date",
     ),
     current_user: User = Depends(get_current_user),
     db: AsyncClient = Depends(get_firestore_client),
@@ -36,9 +37,10 @@ async def get_daily_nutrition_summary(
 
     The summary is calculated by querying all meals for the user within the
     24-hour UTC window of the target date and aggregating their nutrient profiles.
-    Malformed meal records in the database are logged and skipped.
+    Only meals with a 'complete' status are included. Malformed or incomplete
+    meal records in the database are logged and skipped.
     """
-    target_date = date if date else datetime.now(timezone.utc).date()
+    target_date = request_date if request_date else datetime.now(timezone.utc).date()
     logger.info(
         f"Request for daily nutrition summary: user='{current_user.uid}', date={target_date}"
     )
@@ -52,6 +54,9 @@ async def get_daily_nutrition_summary(
             meals_ref.where(filter=FieldFilter("uid", "==", current_user.uid))
             .where(filter=FieldFilter("createdAt", ">=", start_of_day_utc))
             .where(filter=FieldFilter("createdAt", "<=", end_of_day_utc))
+            .where(
+                filter=FieldFilter("status", "==", MealGenerationStatus.COMPLETE.value)
+            )
         )
         docs = await query.get()
     except (google_exceptions.GoogleAPICallError, google_exceptions.RetryError) as e:
@@ -69,18 +74,21 @@ async def get_daily_nutrition_summary(
     meal_count = 0
     snack_count = 0
     beverage_count = 0
+
     for doc in docs:
         try:
             meal = MealDB.model_validate(doc.to_dict())
-            match meal.type:
-                case MealType.MEAL:
-                    meal_count += 1
-                case MealType.SNACK:
-                    snack_count += 1
-                case MealType.BEVERAGE:
-                    beverage_count += 1
-            if meal.nutrient_profile:
-                profiles.append(meal.nutrient_profile)
+            if meal.data:
+                match meal.data.type:
+                    case MealType.MEAL:
+                        meal_count += 1
+                    case MealType.SNACK:
+                        snack_count += 1
+                    case MealType.BEVERAGE:
+                        beverage_count += 1
+                profiles.append(
+                    NutrientProfile(**meal.data.nutrient_profile.model_dump())
+                )
         except ValidationError as e:
             malformed_docs_count += 1
             logger.warning(

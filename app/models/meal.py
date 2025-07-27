@@ -1,10 +1,22 @@
-from datetime import datetime
-from typing import Optional
-from pydantic import BaseModel, ConfigDict
+import enum
+from typing import Optional, List, Any
+
+from pydantic import BaseModel, ConfigDict, field_serializer
 from pydantic.alias_generators import to_camel
 from meal_generator import MealType
 
+
+class MealGenerationStatus(str, enum.Enum):
+    """Enumeration for the status of a meal's generation."""
+
+    PENDING = "pending"
+    COMPLETE = "complete"
+    ERROR = "error"
+    PENDING_EDIT = "pending_edit"
+
+
 class NutrientProfileDB(BaseModel):
+    """Defines the nutritional information for a meal or component."""
 
     energy: float
     fats: float
@@ -29,42 +41,62 @@ class NutrientProfileDB(BaseModel):
     is_processed: bool = False
     is_ultra_processed: bool = False
 
-    model_config = ConfigDict(
-        alias_generator=to_camel,
-        populate_by_name=True,
-    )
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
 
 class MealComponentDB(BaseModel):
+    """Represents a single component within a meal."""
+
     id: str
     name: str
-    brand: Optional[str]
+    brand: Optional[str] = None
     quantity: str
     total_weight: float
     nutrient_profile: NutrientProfileDB
 
-    model_config = ConfigDict(
-        alias_generator=to_camel,
-        populate_by_name=True,
-    )
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
 
-class MealBase(BaseModel):
+class GeneratedMeal(BaseModel):
+    """
+    Represents the actual generated meal data, nested within MealDB.
+    """
+
     name: str
     description: str
     type: MealType
     nutrient_profile: NutrientProfileDB
-    components: list[MealComponentDB]
+    components: List[MealComponentDB]
+
+    @field_serializer("type")
+    def serialize_meal_type(self, meal_type: MealType, _info):
+        """Converts the MealType enum to its string value for serialization."""
+        return meal_type.value
 
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
 
-class MealCreate(MealBase):
-    pass
+class MealDB(BaseModel):
+    """
+    Represents the main meal document stored in Firestore. It contains metadata
+    and the nested 'data' field for the generated meal content.
+    """
 
-
-class MealDB(MealBase):
     id: str
     uid: str
-    submitted_at: datetime
-    created_at: datetime
+    original_input: str
+    status: MealGenerationStatus
+    created_at: Any
+    error: Optional[str] = None
+    data: Optional[GeneratedMeal] = None
+
+    @field_serializer("status")
+    def serialize_meal_type(self, status: MealGenerationStatus, _info):
+        """Converts the MealType enum to its string value for serialization."""
+        return status.value
+
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True,
+        arbitrary_types_allowed=True,
+    )
