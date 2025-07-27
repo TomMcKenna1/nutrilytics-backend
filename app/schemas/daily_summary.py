@@ -1,10 +1,12 @@
 from pydantic import BaseModel, ConfigDict
 from pydantic.alias_generators import to_camel
 
+
 class DailySummary(BaseModel):
     """
     Represents the aggregated nutritional data for a single day.
     """
+
     meal_count: int = 0
     snack_count: int = 0
     beverage_count: int = 0

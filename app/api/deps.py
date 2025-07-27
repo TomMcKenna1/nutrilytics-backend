@@ -1,11 +1,10 @@
-import hashlib
 import logging
+from functools import lru_cache
 
-import redis.asyncio as redis
-from fastapi import Depends, HTTPException, Request, status
+from cachetools import TTLCache, cached
+from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from firebase_admin import auth
-from redis.exceptions import RedisError
 
 from app.db.firebase import get_firebase_auth
 from app.models.user import User
@@ -13,58 +12,27 @@ from app.models.user import User
 logger = logging.getLogger(__name__)
 bearer_scheme = HTTPBearer()
 
+auth_cache = TTLCache(maxsize=1024, ttl=3600)
 
-def get_redis_client(request: Request) -> redis.Redis:
+
+@lru_cache()
+def get_auth_dependency() -> auth:
     """
-    Returns a Redis client from the shared application state.
+    Cached dependency to get the Firebase auth client.
+    This avoids re-initializing the auth client on every request.
     """
-    return request.app.state.redis
+    return get_firebase_auth()
 
 
-async def get_current_user(
-    cred: HTTPAuthorizationCredentials = Depends(bearer_scheme),
-    firebase_auth: auth = Depends(get_firebase_auth),
-    redis_client: redis.Redis = Depends(get_redis_client),
-) -> User:
+@cached(cache=auth_cache)
+def verify_token_and_get_user_data(token: str, firebase_auth: auth) -> dict:
     """
-    Validates a Firebase ID token and returns the corresponding User model.
+    Verifies the Firebase ID token and returns the decoded claims.
+    Results of this function are cached in the TTL cache.
     """
-    if not cred:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Authentication credentials were not provided.",
-        )
-
-    token = cred.credentials
-    hashed_token = hashlib.sha256(token.encode()).hexdigest()
-    cache_key = f"auth_cache:{hashed_token}"
-
     try:
-        cached_user_json = await redis_client.get(cache_key)
-        if cached_user_json:
-            logger.debug("Authentication cache hit for user.")
-            return User.model_validate_json(cached_user_json)
-    except RedisError as e:
-        logger.error(
-            f"Redis error during auth cache lookup: {e}. Proceeding without cache."
-        )
-
-    logger.debug("Authentication cache miss. Verifying token with Firebase.")
-    try:
-        decoded_token = firebase_auth.verify_id_token(token)
-        user = User(
-            uid=decoded_token["uid"],
-            email=decoded_token.get("email"),
-            name=decoded_token.get("name"),
-        )
-
-        try:
-            await redis_client.set(cache_key, user.model_dump_json(), ex=3600)
-        except RedisError as e:
-            logger.error(f"Redis error during auth cache set: {e}.")
-
-        return user
-
+        logger.debug("Cache miss. Verifying token with Firebase.")
+        return firebase_auth.verify_id_token(token)
     except (
         auth.InvalidIdTokenError,
         auth.ExpiredIdTokenError,
@@ -73,13 +41,38 @@ async def get_current_user(
         logger.warning(f"Invalid authentication attempt: {e}")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=f"Invalid or expired token",
+            detail=f"Invalid or expired token: {e}",
         )
     except Exception as e:
         logger.error(
-            f"An unexpected error occurred during authentication: {e}", exc_info=True
+            f"An unexpected error occurred during token verification: {e}",
+            exc_info=True,
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="An internal error occurred during authentication.",
         )
+
+
+async def get_current_user(
+    cred: HTTPAuthorizationCredentials = Depends(bearer_scheme),
+    firebase_auth: auth = Depends(get_auth_dependency),
+) -> User:
+    """
+    Validates a Firebase ID token using a local TTL cache and returns the
+    corresponding User model.
+    """
+    if not cred:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication credentials were not provided.",
+        )
+
+    token = cred.credentials
+    decoded_token = verify_token_and_get_user_data(token, firebase_auth)
+
+    return User(
+        uid=decoded_token["uid"],
+        email=decoded_token.get("email"),
+        name=decoded_token.get("name"),
+    )

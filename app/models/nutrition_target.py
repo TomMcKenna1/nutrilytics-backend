@@ -2,11 +2,13 @@ from typing import Optional
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic.alias_generators import to_camel
 
+
 class NutritionTarget(BaseModel):
     """
     Pydantic model for validating and managing user-defined daily nutrition targets.
     All fields are optional to allow for partial updates.
     """
+
     energy: Optional[float] = Field(
         default=None, gt=0, description="Daily energy target in kcal."
     )

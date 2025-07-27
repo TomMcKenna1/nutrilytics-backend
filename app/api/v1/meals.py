@@ -1,172 +1,199 @@
 import logging
+import uuid
 from typing import Optional
 
-import redis.asyncio as redis
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from pydantic import ValidationError
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    HTTPException,
+    Query,
+    status,
+)
 from google.api_core import exceptions as google_exceptions
 from google.cloud.firestore_v1.async_client import AsyncClient
 from google.cloud.firestore_v1.base_query import FieldFilter
 from google.cloud.firestore_v1.query import Query as FirestoreQuery
 from firebase_admin import firestore
-from pydantic import ValidationError
 
-from app.api.deps import get_current_user, get_redis_client
+from app.api.deps import get_current_user
 from app.db.firebase import get_firestore_client
-from app.models.meal import MealCreate, MealDB
-from app.models.meal_draft import Draft, MealGenerationStatus
+from app.models.meal import (
+    MealDB,
+    GeneratedMeal,
+    MealComponentDB,
+    MealGenerationStatus,
+    NutrientProfileDB,
+)
 from app.models.user import User
-from app.schemas.meal_request import MealListResponse, MealSaveFromDraftRequest
+from app.schemas.meal_request import (
+    AddComponentRequest,
+    MealGenerationRequest,
+    MealListResponse,
+)
+from app.services import meal_generator
+from meal_generator import (
+    Meal as BusinessMeal,
+    ComponentDoesNotExist,
+    MealComponent,
+    MealGenerationError,
+    NutrientProfile,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-@router.post(
-    "/",
-    status_code=status.HTTP_201_CREATED,
-    response_model=MealDB,
-    response_model_by_alias=True,
-)
-async def save_meal_from_draft(
-    request: MealSaveFromDraftRequest,
+def _convert_db_data_to_business_logic_meal(meal_data: GeneratedMeal) -> BusinessMeal:
+    """Converts a GeneratedMeal Pydantic model into a business logic Meal object."""
+
+    def convert_nutrient_profile(np_db: NutrientProfileDB) -> NutrientProfile:
+        return NutrientProfile(**np_db.model_dump())
+
+    components = [
+        MealComponent(
+            name=comp_db.name,
+            quantity=comp_db.quantity,
+            total_weight=comp_db.total_weight,
+            nutrient_profile=convert_nutrient_profile(comp_db.nutrient_profile),
+            brand=comp_db.brand,
+            id=comp_db.id,
+        )
+        for comp_db in meal_data.components
+    ]
+
+    return BusinessMeal(
+        name=meal_data.name,
+        description=meal_data.description,
+        meal_type=meal_data.type,
+        component_list=components,
+    )
+
+
+def _convert_business_logic_meal_to_db_model(
+    business_meal: BusinessMeal,
+) -> GeneratedMeal:
+    """Converts a business logic Meal into a GeneratedMeal Pydantic model for storage."""
+    components_db = [
+        MealComponentDB(
+            id=str(comp.id),
+            name=comp.name,
+            brand=comp.brand,
+            quantity=comp.quantity,
+            total_weight=comp.total_weight,
+            nutrient_profile=NutrientProfileDB(**comp.nutrient_profile.as_dict()),
+        )
+        for comp in business_meal.component_list
+    ]
+    return GeneratedMeal(
+        name=business_meal.name,
+        description=business_meal.description,
+        type=business_meal.type.value,
+        nutrient_profile=NutrientProfileDB(**business_meal.nutrient_profile.as_dict()),
+        components=components_db,
+    )
+
+
+async def _generate_and_update_meal(db: AsyncClient, meal_id: str, description: str):
+    """Generates meal data and updates the Firestore record in the background."""
+    meal_ref = db.collection("meals").document(meal_id)
+    try:
+        business_meal = await meal_generator.generate_meal_async(description)
+        generated_data_model = _convert_business_logic_meal_to_db_model(business_meal)
+
+        await meal_ref.update(
+            {
+                "data": generated_data_model.model_dump(by_alias=True),
+                "status": MealGenerationStatus.COMPLETE.value,
+                "error": None,
+            }
+        )
+        logger.info(f"Successfully finished meal generation for meal '{meal_id}'.")
+    except MealGenerationError as e:
+        logger.error(f"Meal generation failed for meal '{meal_id}': {e}", exc_info=True)
+        await meal_ref.update(
+            {"status": MealGenerationStatus.ERROR.value, "error": str(e)}
+        )
+
+
+async def _add_component_and_update_firestore(
+    db: AsyncClient, meal_id: str, description: str
+):
+    """Generates and adds a new component to a meal's 'data' field in Firestore."""
+    meal_ref = db.collection("meals").document(meal_id)
+    try:
+        meal_doc = await meal_ref.get()
+        if not meal_doc.exists:
+            return
+
+        meal_db = MealDB(**meal_doc.to_dict())
+        if not meal_db.data:
+            raise MealGenerationError("Cannot add component, meal data is missing.")
+
+        business_meal = _convert_db_data_to_business_logic_meal(meal_db.data)
+        await business_meal.add_component_from_string_async(
+            description, meal_generator.get_meal_generator()
+        )
+
+        updated_data_model = _convert_business_logic_meal_to_db_model(business_meal)
+        await meal_ref.update(
+            {
+                "data": updated_data_model.model_dump(by_alias=True),
+                "status": MealGenerationStatus.COMPLETE.value,
+                "error": None,
+            }
+        )
+        logger.info(f"Successfully added component to meal '{meal_id}'.")
+    except (MealGenerationError, Exception) as e:
+        logger.error(
+            f"Component generation failed for meal '{meal_id}': {e}", exc_info=True
+        )
+
+
+@router.post("/", status_code=status.HTTP_202_ACCEPTED, response_model=MealDB)
+async def create_meal(
+    request: MealGenerationRequest,
+    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     db: AsyncClient = Depends(get_firestore_client),
-    redis_client: redis.Redis = Depends(get_redis_client),
-) -> MealDB:
-    """
-    Saves a new meal by validating and promoting a completed meal draft
-    from Redis to a permanent MealDB record in Firestore.
-    """
-    draft_id = request.draft_id
-    logger.info(
-        f"User '{current_user.uid}' attempting to save meal from draft '{draft_id}'."
+):
+    """Creates a placeholder meal and starts the generation in the background."""
+    doc_ref = db.collection("meals").document()
+    meal_placeholder = MealDB(
+        id=doc_ref.id,
+        uid=current_user.uid,
+        original_input=request.description,
+        status=MealGenerationStatus.PENDING,
+        created_at=firestore.SERVER_TIMESTAMP,
     )
 
     try:
-        draft_json = await redis_client.get(f"meal_draft:{draft_id}")
-        if not draft_json:
-            logger.warning(
-                f"Draft '{draft_id}' not found for user '{current_user.uid}'."
-            )
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND, detail="Draft not found."
-            )
-        draft = Draft.model_validate_json(draft_json)
-    except redis.RedisError as e:
-        logger.error(f"Redis error fetching draft '{draft_id}': {e}", exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="A cache server error occurred.",
-        )
-    except ValidationError as e:
-        logger.error(
-            f"Draft '{draft_id}' has invalid format in Redis: {e}", exc_info=True
-        )
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Could not read draft data.",
-        )
-    if draft.uid != current_user.uid:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Not authorised to access this draft.",
-        )
-    if draft.status != MealGenerationStatus.COMPLETE or not draft.meal_draft:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Draft is not complete and cannot be saved.",
-        )
-    try:
-        meal_to_create = MealCreate(**draft.meal_draft.model_dump())
-    except ValidationError as e:
-        logger.error(f"Draft '{draft_id}' data failed validation for MealCreate: {e}")
-        raise HTTPException(status_code=500, detail="Invalid meal data in draft.")
-
-    meals_collection = db.collection("meals")
-    doc_ref = meals_collection.document()
-
-    data_to_save = meal_to_create.model_dump(by_alias=True)
-    data_to_save["id"] = doc_ref.id
-    data_to_save["uid"] = current_user.uid
-    data_to_save["submittedAt"] = draft.created_at
-    data_to_save["createdAt"] = firestore.SERVER_TIMESTAMP
-
-    try:
-        await doc_ref.set(data_to_save)
-        logger.info(f"Saved meal '{doc_ref.id}' for user '{current_user.uid}'.")
-        await redis_client.delete(f"meal_draft:{draft_id}")
-        logger.info(f"Deleted draft '{draft_id}' from Redis.")
-    except (google_exceptions.GoogleAPICallError, google_exceptions.RetryError) as e:
-        logger.error(
-            f"Firestore error saving meal from draft '{draft_id}': {e}", exc_info=True
-        )
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Database error while saving meal.",
-        )
-    except redis.RedisError as e:
-        logger.critical(
-            f"CRITICAL: Failed to delete draft '{draft_id}' after saving meal '{doc_ref.id}'. Manual cleanup required. Error: {e}",
-            exc_info=True,
+        await doc_ref.set(meal_placeholder.model_dump(by_alias=True, exclude_none=True))
+        background_tasks.add_task(
+            _generate_and_update_meal, db, doc_ref.id, request.description
         )
 
-    try:
-        keys_to_delete = [
-            key
-            async for key in redis_client.scan_iter(f"meals_list:{current_user.uid}:*")
-        ]
-        if keys_to_delete:
-            await redis_client.delete(*keys_to_delete)
-            logger.info(
-                f"Invalidated {len(keys_to_delete)} meal list cache keys for user '{current_user.uid}'."
-            )
-    except redis.RedisError as e:
-        logger.error(
-            f"Failed to invalidate meal list cache for user '{current_user.uid}': {e}",
-            exc_info=True,
-        )
-
-    try:
         new_meal_doc = await doc_ref.get()
         return MealDB(**new_meal_doc.to_dict())
     except (google_exceptions.GoogleAPICallError, google_exceptions.RetryError) as e:
         logger.error(
-            f"Failed to fetch newly created meal '{doc_ref.id}': {e}", exc_info=True
+            f"Firestore error creating meal for user '{current_user.uid}': {e}",
+            exc_info=True,
         )
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Meal was saved, but could not be retrieved.",
+            status_code=503, detail="Database error while creating meal."
         )
 
 
-@router.get(
-    "/",
-    response_model=MealListResponse,
-    response_model_by_alias=True,
-)
-async def get_meals_list(
-    response: Response,
+@router.get("/", response_model=MealListResponse)
+async def get_meal_list(
     limit: int = Query(10, ge=1, le=20),
-    next: Optional[str] = Query(None, alias="next"),
+    next_cursor: Optional[str] = Query(None, alias="next"),
     user: User = Depends(get_current_user),
-    redis_client: redis.Redis = Depends(get_redis_client),
     db: AsyncClient = Depends(get_firestore_client),
-) -> MealListResponse:
-    """
-    Retrieves a paginated list of the user's most recent meals from Firestore.
-    """
-    cache_key = f"meals_list:{user.uid}:{limit}:{next or 'first'}"
-
-    try:
-        if cached_data := await redis_client.get(cache_key):
-            logger.info(f"Cache hit for key: {cache_key}")
-            response.headers["X-Cache"] = "hit"
-            return MealListResponse.model_validate_json(cached_data)
-    except redis.RedisError as e:
-        logger.error(f"Redis GET error for key '{cache_key}': {e}", exc_info=True)
-
-    response.headers["X-Cache"] = "miss"
-
+):
+    """Retrieves a paginated list of the user's meals."""
     try:
         meals_ref = db.collection("meals")
         query = (
@@ -175,8 +202,8 @@ async def get_meals_list(
             .order_by("id", direction=FirestoreQuery.DESCENDING)
         )
 
-        if next:
-            last_doc = await meals_ref.document(next).get()
+        if next_cursor:
+            last_doc = await meals_ref.document(next_cursor).get()
             if not last_doc.exists:
                 raise HTTPException(
                     status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -199,27 +226,16 @@ async def get_meals_list(
     next_page_cursor = docs[-1].id if len(docs) == limit else None
     final_response = MealListResponse(meals=meals_list, next=next_page_cursor)
 
-    try:
-        await redis_client.set(cache_key, final_response.model_dump_json(), ex=300)
-    except redis.RedisError as e:
-        logger.error(f"Redis SET error for key '{cache_key}': {e}", exc_info=True)
-
     return final_response
 
 
-@router.get(
-    "/{meal_id}",
-    response_model=MealDB,
-    response_model_by_alias=True,
-)
+@router.get("/{meal_id}", response_model=MealDB)
 async def get_meal_by_id(
     meal_id: str,
     current_user: User = Depends(get_current_user),
     db: AsyncClient = Depends(get_firestore_client),
-) -> MealDB:
-    """
-    Retrieves a specific meal by its ID from Firestore, checking for ownership.
-    """
+):
+    """Retrieves a specific meal by its ID."""
     logger.info(f"User '{current_user.uid}' requesting meal '{meal_id}'.")
     try:
         doc_ref = db.collection("meals").document(meal_id)
@@ -250,4 +266,139 @@ async def get_meal_by_id(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Could not read meal data.",
+        )
+
+
+@router.post(
+    "/{meal_id}/components", status_code=status.HTTP_202_ACCEPTED, response_model=MealDB
+)
+async def add_component_to_meal(
+    meal_id: str,
+    request: AddComponentRequest,
+    background_tasks: BackgroundTasks,
+    current_user: User = Depends(get_current_user),
+    db: AsyncClient = Depends(get_firestore_client),
+):
+    """Adds a component to a meal's 'data', updating it in the background."""
+    meal_ref = db.collection("meals").document(meal_id)
+    meal_doc = await meal_ref.get()
+    if not meal_doc.exists:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Meal not found"
+        )
+
+    meal = MealDB(**meal_doc.to_dict())
+    if meal.uid != current_user.uid:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Not authorized to modify this meal",
+        )
+    if meal.status != MealGenerationStatus.COMPLETE or not meal.data:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Meal must be 'complete' with data to modify.",
+        )
+
+    await meal_ref.update({"status": MealGenerationStatus.PENDING_EDIT.value})
+
+    background_tasks.add_task(
+        _add_component_and_update_firestore, db, meal_id, request.description
+    )
+
+    meal.status = MealGenerationStatus.PENDING_EDIT
+    return meal
+
+
+@router.delete(
+    "/{meal_id}/components/{component_id}",
+    status_code=status.HTTP_200_OK,
+    response_model=MealDB,
+)
+async def remove_component_from_meal(
+    meal_id: str,
+    component_id: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncClient = Depends(get_firestore_client),
+):
+    """Removes a component from a meal's 'data' field synchronously."""
+    meal_ref = db.collection("meals").document(meal_id)
+    try:
+        meal_doc = await meal_ref.get()
+        if not meal_doc.exists:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="Meal not found"
+            )
+
+        meal = MealDB(**meal_doc.to_dict())
+        if meal.uid != current_user.uid:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized"
+            )
+        if meal.status != MealGenerationStatus.COMPLETE or not meal.data:
+            raise HTTPException(
+                status_code=409,
+                detail="Meal is not in a 'complete' state for modification.",
+            )
+
+        business_meal = _convert_db_data_to_business_logic_meal(meal.data)
+        try:
+            component_uuid = uuid.UUID(component_id)
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Invalid component ID.",
+            )
+        business_meal.remove_component(component_uuid)
+
+        updated_data_model = _convert_business_logic_meal_to_db_model(business_meal)
+        await meal_ref.update({"data": updated_data_model.model_dump(by_alias=True)})
+        updated_doc = await meal_ref.get()
+        return MealDB(**updated_doc.to_dict())
+    except ComponentDoesNotExist:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Component not found in meal."
+        )
+
+
+@router.delete("/{meal_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_meal(
+    meal_id: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncClient = Depends(get_firestore_client),
+):
+    """Deletes a meal from Firestore."""
+    logger.info(f"User '{current_user.uid}' attempting to delete meal '{meal_id}'.")
+    meal_ref = db.collection("meals").document(meal_id)
+
+    try:
+        meal_doc = await meal_ref.get()
+
+        if not meal_doc.exists:
+            logger.warning(
+                f"Attempt to delete non-existent meal '{meal_id}' by user '{current_user.uid}'. "
+            )
+            return
+
+        if meal_doc.to_dict().get("uid") != current_user.uid:
+            logger.warning(
+                f"User '{current_user.uid}' forbidden from deleting meal '{meal_id}' owned by another user."
+            )
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Not authorized to delete this meal",
+            )
+
+        await meal_ref.delete()
+        logger.info(
+            f"Successfully deleted meal '{meal_id}' for user '{current_user.uid}'."
+        )
+
+    except (
+        google_exceptions.GoogleAPICallError,
+        google_exceptions.RetryError,
+    ) as e:
+        logger.error(f"Firestore error deleting meal '{meal_id}': {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="A database error occurred while deleting the meal.",
         )

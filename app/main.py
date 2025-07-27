@@ -5,7 +5,7 @@ import redis.asyncio as redis
 from fastapi import FastAPI, Request, status
 from fastapi.responses import JSONResponse
 
-from app.api.v1 import auth as auth_v1, meal_drafts, meals, metrics, user
+from app.api.v1 import auth as auth_v1, meals, metrics, user
 from app.core.config import settings
 from app.db.firebase import initialize_firebase
 
@@ -26,19 +26,11 @@ async def lifespan(app: FastAPI):
     logging.info("Application startup...")
     try:
         initialize_firebase()
-        app.state.redis = redis.from_url(settings.REDIS_URL, decode_responses=True)
-        await app.state.redis.ping()
-        logging.info("Successfully connected to Redis.")
     except Exception as e:
         logging.critical(f"Failed to initialize resources: {e}")
         raise
 
     yield
-
-    logging.info("Application shutdown...")
-    if hasattr(app.state, "redis") and app.state.redis:
-        await app.state.redis.close()
-        logging.info("Redis connection closed.")
 
 
 app = FastAPI(
@@ -64,9 +56,6 @@ async def generic_exception_handler(request: Request, exc: Exception):
 
 
 app.include_router(auth_v1.router, prefix="/api/v1/auth", tags=["auth"])
-app.include_router(
-    meal_drafts.router, prefix="/api/v1/meal_drafts", tags=["meal_drafts"]
-)
 app.include_router(meals.router, prefix="/api/v1/meals", tags=["meals"])
 app.include_router(metrics.router, prefix="/api/v1/metrics", tags=["metrics"])
 app.include_router(user.router, prefix="/api/v1/user", tags=["user"])
