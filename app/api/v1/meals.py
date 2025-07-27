@@ -1,7 +1,10 @@
+import asyncio
+from collections import defaultdict
 import logging
 import uuid
-from typing import Optional
+from typing import Any, Dict, List, Optional
 
+from fastapi.responses import StreamingResponse
 from pydantic import ValidationError
 from fastapi import (
     APIRouter,
@@ -9,6 +12,7 @@ from fastapi import (
     Depends,
     HTTPException,
     Query,
+    Request,
     status,
 )
 from google.api_core import exceptions as google_exceptions
@@ -43,6 +47,47 @@ from meal_generator import (
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+# In-memory Pub/Sub notifier - This would probably work for 10000ish users
+# but would need to change to something like redis pub/sub to scale (maybe
+# move to websockets aswell for reliable crossway communication)
+
+
+class Notifier:
+    """Manages active SSE listeners and broadcasts messages."""
+
+    def __init__(self):
+        self.listeners: Dict[str, List[asyncio.Queue]] = defaultdict(list)
+
+    def subscribe(self, user_id: str) -> asyncio.Queue:
+        """Adds a new queue to the user's list of listeners and returns it."""
+        queue = asyncio.Queue()
+        self.listeners[user_id].append(queue)
+        logger.info(
+            f"User '{user_id}' subscribed. Total listeners for user: {len(self.listeners[user_id])}"
+        )
+        return queue
+
+    def unsubscribe(self, user_id: str, queue: asyncio.Queue):
+        """Removes a queue from the user's list of listeners."""
+        if user_id in self.listeners:
+            self.listeners[user_id].remove(queue)
+            if not self.listeners[user_id]:
+                del self.listeners[user_id]
+            logger.info(f"User '{user_id}' unsubscribed.")
+
+    async def publish(self, user_id: str, message: Any):
+        """Puts a message into all active queues for a given user."""
+        if user_id in self.listeners:
+            logger.info(
+                f"Publishing update to {len(self.listeners[user_id])} listeners for user '{user_id}'"
+            )
+            for queue in self.listeners[user_id]:
+                await queue.put(message)
+
+
+# Create a single, shared instance of the Notifier
+notifier = Notifier()
 
 
 def _convert_db_data_to_business_logic_meal(meal_data: GeneratedMeal) -> BusinessMeal:
@@ -95,47 +140,46 @@ def _convert_business_logic_meal_to_db_model(
     )
 
 
-async def _generate_and_update_meal(db: AsyncClient, meal_id: str, description: str):
-    """Generates meal data and updates the Firestore record in the background."""
+async def _generate_and_update_meal(
+    db: AsyncClient, meal_id: str, description: str, user_id: str
+):
+    """Generates meal data, updates Firestore, and publishes a notification."""
     meal_ref = db.collection("meals").document(meal_id)
+    update_payload = {}
     try:
         business_meal = await meal_generator.generate_meal_async(description)
         generated_data_model = _convert_business_logic_meal_to_db_model(business_meal)
-
-        await meal_ref.update(
-            {
-                "data": generated_data_model.model_dump(by_alias=True),
-                "status": MealGenerationStatus.COMPLETE.value,
-                "error": None,
-            }
-        )
-        logger.info(f"Successfully finished meal generation for meal '{meal_id}'.")
+        update_payload = {
+            "data": generated_data_model.model_dump(by_alias=True),
+            "status": MealGenerationStatus.COMPLETE.value,
+            "error": None,
+        }
     except MealGenerationError as e:
         logger.error(f"Meal generation failed for meal '{meal_id}': {e}", exc_info=True)
-        await meal_ref.update(
-            {"status": MealGenerationStatus.ERROR.value, "error": str(e)}
-        )
+        update_payload = {"status": MealGenerationStatus.ERROR.value, "error": str(e)}
+    finally:
+        await meal_ref.update(update_payload)
+        updated_doc = await meal_ref.get()
+        meal = MealDB(**updated_doc.to_dict())
+        await notifier.publish(user_id, meal)
 
 
 async def _add_component_and_update_firestore(
-    db: AsyncClient, meal_id: str, description: str
+    db: AsyncClient, meal_id: str, description: str, user_id: str
 ):
-    """Generates and adds a new component to a meal's 'data' field in Firestore."""
+    """Adds a component, updates Firestore, and publishes a notification."""
     meal_ref = db.collection("meals").document(meal_id)
     try:
         meal_doc = await meal_ref.get()
         if not meal_doc.exists:
             return
-
         meal_db = MealDB(**meal_doc.to_dict())
         if not meal_db.data:
             raise MealGenerationError("Cannot add component, meal data is missing.")
-
         business_meal = _convert_db_data_to_business_logic_meal(meal_db.data)
         await business_meal.add_component_from_string_async(
             description, meal_generator.get_meal_generator()
         )
-
         updated_data_model = _convert_business_logic_meal_to_db_model(business_meal)
         await meal_ref.update(
             {
@@ -144,11 +188,17 @@ async def _add_component_and_update_firestore(
                 "error": None,
             }
         )
-        logger.info(f"Successfully added component to meal '{meal_id}'.")
     except (MealGenerationError, Exception) as e:
         logger.error(
             f"Component generation failed for meal '{meal_id}': {e}", exc_info=True
         )
+        await meal_ref.update(
+            {"status": MealGenerationStatus.ERROR.value, "error": str(e)}
+        )
+    finally:
+        updated_doc = await meal_ref.get()
+        meal = MealDB(**updated_doc.to_dict())
+        await notifier.publish(user_id, meal)
 
 
 @router.post("/", status_code=status.HTTP_202_ACCEPTED, response_model=MealDB)
@@ -171,7 +221,11 @@ async def create_meal(
     try:
         await doc_ref.set(meal_placeholder.model_dump(by_alias=True, exclude_none=True))
         background_tasks.add_task(
-            _generate_and_update_meal, db, doc_ref.id, request.description
+            _generate_and_update_meal,
+            db,
+            doc_ref.id,
+            request.description,
+            current_user.uid,
         )
 
         new_meal_doc = await doc_ref.get()
@@ -227,6 +281,41 @@ async def get_meal_list(
     final_response = MealListResponse(meals=meals_list, next=next_page_cursor)
 
     return final_response
+
+
+@router.get("/stream")
+async def stream_meal_updates(
+    request: Request,
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Creates an SSE stream using FastAPI's StreamingResponse to notify the
+    client of real-time updates to their meals.
+    """
+
+    async def event_generator():
+        """
+        Subscribes to the in-memory notifier and yields events formatted
+        manually for the SSE protocol.
+        """
+        queue = notifier.subscribe(current_user.uid)
+        try:
+            while True:
+                if await request.is_disconnected():
+                    break
+
+                meal_update: MealDB = await queue.get()
+
+                event_data = meal_update.model_dump_json(by_alias=True)
+                sse_message = f"event: meal_update\ndata: {event_data}\n\n"
+
+                yield sse_message
+        except asyncio.CancelledError:
+            logger.info(f"SSE connection cancelled for user '{current_user.uid}'.")
+        finally:
+            notifier.unsubscribe(current_user.uid, queue)
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
 @router.get("/{meal_id}", response_model=MealDB)
@@ -302,7 +391,11 @@ async def add_component_to_meal(
     await meal_ref.update({"status": MealGenerationStatus.PENDING_EDIT.value})
 
     background_tasks.add_task(
-        _add_component_and_update_firestore, db, meal_id, request.description
+        _add_component_and_update_firestore,
+        db,
+        meal_id,
+        request.description,
+        current_user.uid,
     )
 
     meal.status = MealGenerationStatus.PENDING_EDIT
