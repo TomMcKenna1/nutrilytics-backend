@@ -4,6 +4,7 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, field_serializer
 from pydantic.alias_generators import to_camel
+from meal_generator import MealType
 
 from app.models.meal import MealComponentDB, NutrientProfileDB
 
@@ -18,6 +19,7 @@ class MealGenerationStatus(enum.Enum):
 class MealDraft(BaseModel):
     name: str
     description: str
+    type: MealType
     nutrient_profile: NutrientProfileDB
     components: list[MealComponentDB]
 

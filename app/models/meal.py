@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import Optional
 from pydantic import BaseModel, ConfigDict
 from pydantic.alias_generators import to_camel
-
+from meal_generator import MealType
 
 class NutrientProfileDB(BaseModel):
 
@@ -52,6 +52,7 @@ class MealComponentDB(BaseModel):
 class MealBase(BaseModel):
     name: str
     description: str
+    type: MealType
     nutrient_profile: NutrientProfileDB
     components: list[MealComponentDB]
 

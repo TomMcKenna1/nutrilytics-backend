@@ -54,6 +54,7 @@ def _convert_draft_to_generated_meal(draft_data: MealDraft) -> GeneratedMeal:
     meal = GeneratedMeal(
         name=draft_data.name,
         description=draft_data.description,
+        meal_type=draft_data.type,
         component_list=components,
     )
     return meal
@@ -78,6 +79,7 @@ def _convert_meal_to_draft_schema(generated_meal: GeneratedMeal) -> MealDraft:
     meal_draft = MealDraft(
         name=generated_meal.name,
         description=generated_meal.description,
+        type=generated_meal.type,
         nutrient_profile=NutrientProfileDB(**generated_meal.nutrient_profile.as_dict()),
         components=components_db,
     )

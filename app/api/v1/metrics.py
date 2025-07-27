@@ -12,7 +12,7 @@ from app.db.firebase import get_firestore_client
 from app.models.meal import MealDB
 from app.models.user import User
 from app.schemas.daily_summary import DailySummary
-from meal_generator import NutrientProfile
+from meal_generator import NutrientProfile, MealType
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -66,9 +66,19 @@ async def get_daily_nutrition_summary(
 
     profiles = []
     malformed_docs_count = 0
+    meal_count = 0
+    snack_count = 0
+    beverage_count = 0
     for doc in docs:
         try:
             meal = MealDB.model_validate(doc.to_dict())
+            match meal.type:
+                case MealType.MEAL:
+                    meal_count += 1
+                case MealType.SNACK:
+                    snack_count += 1
+                case MealType.BEVERAGE:
+                    beverage_count += 1
             if meal.nutrient_profile:
                 profiles.append(meal.nutrient_profile)
         except ValidationError as e:
@@ -86,7 +96,10 @@ async def get_daily_nutrition_summary(
     total_nutrients = sum(profiles, NutrientProfile())
 
     summary = DailySummary(
-        meals_logged=len(profiles), **total_nutrients.as_dict()
+        meal_count=meal_count,
+        snack_count=snack_count,
+        beverage_count=beverage_count,
+        **total_nutrients.as_dict(),
     )
 
     logger.info(

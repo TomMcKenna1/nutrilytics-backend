@@ -5,7 +5,9 @@ class DailySummary(BaseModel):
     """
     Represents the aggregated nutritional data for a single day.
     """
-    meals_logged: int = 0
+    meal_count: int = 0
+    snack_count: int = 0
+    beverage_count: int = 0
     energy: float = 0
     fats: float = 0
     saturated_fats: float = 0

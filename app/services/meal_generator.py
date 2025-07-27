@@ -29,7 +29,7 @@ def get_meal_generator() -> MealGenerator:
     return MealGenerator(api_key=settings.GEMINI_API_KEY)
 
 
-async def generate_meal_async(description: str) -> Meal:
+async def generate_meal_async(description: str, country_code: str = "GB") -> Meal:
     """
     Generates a meal by calling the MealGenerator library.
 
@@ -48,7 +48,7 @@ async def generate_meal_async(description: str) -> Meal:
     """
     try:
         generator = get_meal_generator()
-        return await generator.generate_meal_async(description)
+        return await generator.generate_meal_async(description, country_code)
     except (ValueError, MealGenerationError) as e:
         logger.error(f"Could not complete meal generation: {e}", exc_info=True)
         # Re-raise a consistent error type to be handled by the caller.
