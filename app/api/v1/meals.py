@@ -35,6 +35,7 @@ from app.schemas.meal_request import (
     AddComponentRequest,
     MealGenerationRequest,
     MealListResponse,
+    UpdateMealTypeRequest,
 )
 from app.services import meal_generator
 from meal_generator import (
@@ -355,6 +356,85 @@ async def get_meal_by_id(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Could not read meal data.",
+        )
+
+
+@router.patch("/{meal_id}/type", response_model=MealDB)
+async def update_meal_type(
+    meal_id: str,
+    request: UpdateMealTypeRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncClient = Depends(get_firestore_client),
+):
+    """
+    Updates the 'type' of a specific meal.
+
+    This endpoint allows an authenticated user to change the meal type
+    (e.g., from 'Breakfast' to 'Lunch') for one of their existing meals.
+    The meal must be in a 'complete' state to be modified.
+    """
+    logger.info(
+        f"User '{current_user.uid}' attempting to update meal type for '{meal_id}' to '{request.type.value}'."
+    )
+    meal_ref = db.collection("meals").document(meal_id)
+
+    try:
+        meal_doc = await meal_ref.get()
+
+        if not meal_doc.exists:
+            logger.warning(
+                f"User '{current_user.uid}' failed to update non-existent meal '{meal_id}'."
+            )
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="Meal not found"
+            )
+
+        meal_data = meal_doc.to_dict()
+        if meal_data.get("uid") != current_user.uid:
+            logger.warning(
+                f"Forbidden attempt by user '{current_user.uid}' to update meal '{meal_id}'."
+            )
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Not authorised to modify this meal",
+            )
+
+        meal = MealDB(**meal_data)
+        if meal.status != MealGenerationStatus.COMPLETE or not meal.data:
+            logger.error(
+                f"Attempt to update meal '{meal_id}' in non-complete state: {meal.status}."
+            )
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Meal is not in a 'complete' state and cannot be modified.",
+            )
+
+        await meal_ref.update({"data.type": request.type.value})
+
+        updated_doc = await meal_ref.get()
+        updated_meal = MealDB(**updated_doc.to_dict())
+
+        logger.info(
+            f"Successfully updated meal type for '{meal_id}' for user '{current_user.uid}'."
+        )
+        return updated_meal
+
+    except (google_exceptions.GoogleAPICallError, google_exceptions.RetryError) as e:
+        logger.error(
+            f"Firestore error updating meal type for '{meal_id}': {e}", exc_info=True
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="A database error occurred while updating the meal.",
+        )
+    except ValidationError as e:
+        logger.error(
+            f"Data validation failed for meal '{meal_id}' after update: {e}",
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Meal data is in an invalid format.",
         )
 
 
