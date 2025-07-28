@@ -1,7 +1,14 @@
 from typing import List, Optional
+from meal_generator import MealType
 from pydantic import BaseModel, Field
 
 from app.models.meal import MealDB
+
+
+class UpdateMealTypeRequest(BaseModel):
+    """Schema for updating the type of a meal."""
+
+    type: MealType
 
 
 class MealGenerationRequest(BaseModel):
