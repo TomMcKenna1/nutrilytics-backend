@@ -12,7 +12,14 @@ from app.api.deps import get_current_user
 from app.db.firebase import get_firestore_client
 from app.models.meal import MealDB, MealGenerationStatus, ComponentType
 from app.models.user import AuthUser
-from app.schemas.metric_request import DailySummary, NutrientSummary, SevenDayResponse, WeeklyBreakdown
+from app.schemas.metric_request import (
+    DailySummary,
+    MonthlyNutritionLog,
+    MonthlySummaryResponse,
+    NutrientSummary,
+    SevenDayResponse,
+    WeeklyBreakdown,
+)
 from meal_generator import NutrientProfile, MealType
 
 logger = logging.getLogger(__name__)
@@ -89,7 +96,7 @@ async def get_daily_nutrition_summary(
                     for component in meal.data.components:
                         if component.type == ComponentType.BEVERAGE:
                             beverage_count += 1
-                
+
                 profiles.append(
                     NutrientProfile(**meal.data.nutrient_profile.model_dump())
                 )
@@ -192,7 +199,7 @@ async def get_macros_by_day(
                 meal_date_str = meal.created_at.date().isoformat()
                 if meal_date_str in daily_totals:
                     profile = NutrientProfile(**meal.data.nutrient_profile.model_dump())
-                    
+
                     # Aggregate nutrients based on the meal's top-level type
                     match meal.data.type:
                         case MealType.MEAL:
@@ -213,9 +220,127 @@ async def get_macros_by_day(
             response_data[day_str] = None
         else:
             response_data[day_str] = WeeklyBreakdown(
-                meals=NutrientSummary(**totals["meals"].as_dict()) if totals["meals"] != NutrientProfile() else None,
-                snacks=NutrientSummary(**totals["snacks"].as_dict()) if totals["snacks"] != NutrientProfile() else None,
-                beverages=NutrientSummary(**totals["beverages"].as_dict()) if totals["beverages"] != NutrientProfile() else None,
+                meals=(
+                    NutrientSummary(**totals["meals"].as_dict())
+                    if totals["meals"] != NutrientProfile()
+                    else None
+                ),
+                snacks=(
+                    NutrientSummary(**totals["snacks"].as_dict())
+                    if totals["snacks"] != NutrientProfile()
+                    else None
+                ),
+                beverages=(
+                    NutrientSummary(**totals["beverages"].as_dict())
+                    if totals["beverages"] != NutrientProfile()
+                    else None
+                ),
             )
 
     return SevenDayResponse(root=response_data)
+
+
+@router.get(
+    "/monthlySummary/{year_month}",
+    response_model=MonthlySummaryResponse,
+    response_model_by_alias=True,
+    summary="Get Monthly Nutrition Summary",
+)
+async def get_monthly_nutrition_summary(
+    year_month: str,
+    current_user: AuthUser = Depends(get_current_user),
+    db: AsyncClient = Depends(get_firestore_client),
+):
+    """
+    Provides a daily nutritional summary for a specified month (YYYY-MM).
+
+    The summary is calculated by querying all 'complete' meals for the user
+    within the given month and aggregating their nutrient profiles for each day.
+    Months in the future are not permitted.
+    """
+    try:
+        requested_month_dt = datetime.strptime(year_month, "%Y-%m")
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid year_month format. Please use YYYY-MM.",
+        )
+
+    # Disallow requests for future months
+    current_date = datetime.now(timezone.utc).date()
+    first_day_of_current_month = current_date.replace(day=1)
+
+    if requested_month_dt.date().replace(day=1) > first_day_of_current_month:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot request data for a future month.",
+        )
+
+    start_of_month = requested_month_dt.replace(tzinfo=timezone.utc)
+    # Find the last day of the month
+    next_month = start_of_month.replace(day=28) + timedelta(days=4)
+    end_of_month = next_month - timedelta(days=next_month.day)
+    end_of_period_utc = datetime.combine(
+        end_of_month.date(), time.max, tzinfo=timezone.utc
+    )
+
+    try:
+        meals_ref = db.collection("meals")
+        query = (
+            meals_ref.where(filter=FieldFilter("uid", "==", current_user.uid))
+            .where(filter=FieldFilter("createdAt", ">=", start_of_month))
+            .where(filter=FieldFilter("createdAt", "<=", end_of_period_utc))
+            .where(
+                filter=FieldFilter("status", "==", MealGenerationStatus.COMPLETE.value)
+            )
+        )
+        docs = await query.get()
+    except (google_exceptions.GoogleAPICallError, google_exceptions.RetryError) as e:
+        logger.error(
+            f"Firestore query failed for user '{current_user.uid}': {e}", exc_info=True
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="A database error occurred while fetching meal data.",
+        )
+
+    daily_data: Dict[str, Dict] = {}
+
+    for doc in docs:
+        try:
+            meal = MealDB.model_validate(doc.to_dict())
+            if meal.data and meal.created_at:
+                meal_date_str = meal.created_at.date().isoformat()
+
+                if meal_date_str not in daily_data:
+                    daily_data[meal_date_str] = {
+                        "meal_count": 0,
+                        "nutrition": NutrientProfile(),
+                        "logs": [],
+                    }
+
+                daily_data[meal_date_str]["nutrition"] += NutrientProfile(
+                    **meal.data.nutrient_profile.model_dump()
+                )
+                if meal.data.type == MealType.MEAL:
+                    daily_data[meal_date_str]["meal_count"] += 1
+                    daily_data[meal_date_str]["logs"].append(meal.data.name)
+
+        except ValidationError as e:
+            logger.warning(f"Skipping malformed meal doc '{doc.id}': {e}")
+
+    response_data = {}
+    num_days = (end_of_month.date() - start_of_month.date()).days + 1
+    for i in range(num_days):
+        current_date = (start_of_month.date() + timedelta(days=i)).isoformat()
+        if current_date in daily_data:
+            day_data = daily_data[current_date]
+            response_data[current_date] = MonthlyNutritionLog(
+                meal_count=day_data["meal_count"],
+                nutrition=NutrientSummary(**day_data["nutrition"].as_dict()),
+                logs=day_data["logs"],
+            )
+        else:
+            response_data[current_date] = None
+
+    return MonthlySummaryResponse(root=response_data)
