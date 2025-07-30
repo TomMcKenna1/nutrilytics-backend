@@ -3,6 +3,7 @@ from collections import defaultdict
 import logging
 import uuid
 from typing import Any, Dict, List, Optional
+from datetime import datetime, timedelta, timezone
 
 from fastapi.responses import StreamingResponse
 from pydantic import ValidationError
@@ -31,7 +32,7 @@ from app.models.meal import (
     NutrientProfileDB,
     ComponentType as DBComponentType,
 )
-from app.models.user import AuthUser
+from app.models.user import AuthUser, UserInDB
 from app.schemas.meal_request import (
     AddComponentRequest,
     MealGenerationRequest,
@@ -206,6 +207,30 @@ async def _add_component_and_update_firestore(
         await notifier.publish(user_id, meal)
 
 
+async def update_streak(db, current_user):
+    user_doc_ref = db.collection("users").document(current_user.uid)
+    user_doc = await user_doc_ref.get()
+
+    if user_doc.exists:
+        user = UserInDB(**user_doc.to_dict())
+        now = datetime.now(timezone.utc)
+        today = now.date()
+        new_streak = user.log_streak
+
+        if user.last_activity_at is None:
+            new_streak = 1
+        else:
+            last_activity_date = user.last_activity_at.date()
+            if last_activity_date < today:
+                if last_activity_date == today - timedelta(days=1):
+                    new_streak += 1
+                else:
+                    new_streak = 1
+
+        await user_doc_ref.update({"logStreak": new_streak, "lastActivityAt": now})
+        logger.info(f"Updated streak for user '{current_user.uid}' to {new_streak}.")
+
+
 @router.post("/", status_code=status.HTTP_202_ACCEPTED, response_model=MealDB)
 async def create_meal(
     request: MealGenerationRequest,
@@ -214,6 +239,8 @@ async def create_meal(
     db: AsyncClient = Depends(get_firestore_client),
 ):
     """Creates a placeholder meal and starts the generation in the background."""
+    await update_streak(db, current_user)
+
     doc_ref = db.collection("meals").document()
     meal_placeholder = MealDB(
         id=doc_ref.id,

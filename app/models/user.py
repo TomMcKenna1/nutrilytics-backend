@@ -1,3 +1,4 @@
+# app/models/user.py
 from datetime import datetime
 from typing import Optional
 
@@ -28,6 +29,8 @@ class UserInDB(BaseModel):
     nutrition_targets: Optional[NutritionTarget] = Field(
         default=None, alias="nutritionTargets"
     )
+    log_streak: int = Field(default=0, alias="logStreak")
+    last_activity_at: Optional[datetime] = Field(default=None, alias="lastActivityAt")
 
     model_config = ConfigDict(
         alias_generator=to_camel,

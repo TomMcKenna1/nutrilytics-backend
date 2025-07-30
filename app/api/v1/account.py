@@ -46,6 +46,8 @@ async def create_user_record(
             "profile": None,
             "nutritionTargets": {},
             "onboardingComplete": False,
+            "logStreak": 0,
+            "lastActivityAt": None,
         }
 
         await user_doc_ref.set(user_data)
@@ -251,4 +253,76 @@ async def get_user_nutrition_targets(
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="A database error occurred.",
+        )
+
+
+@router.post(
+    "/streak/log",
+    response_model=UserInDB,
+    status_code=status.HTTP_200_OK,
+    summary="Log Daily Activity to Update Streak",
+    description="Updates the user's daily streak based on their last activity. This should be called when a user performs a loggable action, like submitting a meal.",
+)
+async def update_user_streak(
+    current_user: AuthUser = Depends(get_current_user),
+    db: AsyncClient = Depends(get_firestore_client),
+):
+    """
+    Checks the user's last activity date and updates their daily streak.
+    - If the last log was yesterday, the streak is incremented.
+    - If the last log was before yesterday, the streak is reset to 1.
+    - If this is the first log, the streak starts at 1.
+    - If a log was already made today, the streak is unchanged.
+    """
+    logger.info(f"User '{current_user.uid}' attempting to update streak.")
+    user_doc_ref = db.collection("users").document(current_user.uid)
+
+    try:
+        doc = await user_doc_ref.get()
+        if not doc.exists:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="User record not found. Cannot update streak.",
+            )
+
+        user = UserInDB(**doc.to_dict())
+        now = datetime.now(timezone.utc)
+        today = now.date()
+
+        new_streak = user.log_streak
+
+        if user.last_activity_at is None:
+            # First-ever log for the user
+            new_streak = 1
+        else:
+            last_activity_date = user.last_activity_at.date()
+
+            if last_activity_date < today:
+                # This is the first log of a new day
+                if last_activity_date == today - timedelta(days=1):
+                    # Last log was yesterday, so increment the streak
+                    new_streak += 1
+                else:
+                    # Last log was before yesterday, so the streak is broken
+                    new_streak = 1
+            # If last_activity_date == today, do nothing to the streak.
+
+        update_data = {
+            "logStreak": new_streak,
+            "lastActivityAt": now,
+        }
+
+        await user_doc_ref.update(update_data)
+        logger.info(
+            f"Successfully updated streak for user '{current_user.uid}' to {new_streak}."
+        )
+
+        updated_doc = await user_doc_ref.get()
+        return UserInDB(**updated_doc.to_dict())
+
+    except (google_exceptions.GoogleAPICallError, google_exceptions.RetryError) as e:
+        logger.error(f"Firestore error updating streak for '{current_user.uid}': {e}")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="A database error occurred while updating the streak.",
         )
