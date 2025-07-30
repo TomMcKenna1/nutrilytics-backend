@@ -29,8 +29,9 @@ from app.models.meal import (
     MealComponentDB,
     MealGenerationStatus,
     NutrientProfileDB,
+    ComponentType as DBComponentType,
 )
-from app.models.user import User
+from app.models.user import AuthUser
 from app.schemas.meal_request import (
     AddComponentRequest,
     MealGenerationRequest,
@@ -44,6 +45,7 @@ from meal_generator import (
     MealComponent,
     MealGenerationError,
     NutrientProfile,
+    ComponentType as BusinessComponentType,
 )
 
 logger = logging.getLogger(__name__)
@@ -102,6 +104,7 @@ def _convert_db_data_to_business_logic_meal(meal_data: GeneratedMeal) -> Busines
             name=comp_db.name,
             quantity=comp_db.quantity,
             total_weight=comp_db.total_weight,
+            component_type=BusinessComponentType(comp_db.type.value),
             nutrient_profile=convert_nutrient_profile(comp_db.nutrient_profile),
             brand=comp_db.brand,
             id=comp_db.id,
@@ -128,6 +131,7 @@ def _convert_business_logic_meal_to_db_model(
             brand=comp.brand,
             quantity=comp.quantity,
             total_weight=comp.total_weight,
+            type=DBComponentType(comp.type.value),
             nutrient_profile=NutrientProfileDB(**comp.nutrient_profile.as_dict()),
         )
         for comp in business_meal.component_list
@@ -135,7 +139,7 @@ def _convert_business_logic_meal_to_db_model(
     return GeneratedMeal(
         name=business_meal.name,
         description=business_meal.description,
-        type=business_meal.type.value,
+        type=business_meal.type,
         nutrient_profile=NutrientProfileDB(**business_meal.nutrient_profile.as_dict()),
         components=components_db,
     )
@@ -206,7 +210,7 @@ async def _add_component_and_update_firestore(
 async def create_meal(
     request: MealGenerationRequest,
     background_tasks: BackgroundTasks,
-    current_user: User = Depends(get_current_user),
+    current_user: AuthUser = Depends(get_current_user),
     db: AsyncClient = Depends(get_firestore_client),
 ):
     """Creates a placeholder meal and starts the generation in the background."""
@@ -245,7 +249,7 @@ async def create_meal(
 async def get_meal_list(
     limit: int = Query(10, ge=1, le=20),
     next_cursor: Optional[str] = Query(None, alias="next"),
-    user: User = Depends(get_current_user),
+    user: AuthUser = Depends(get_current_user),
     db: AsyncClient = Depends(get_firestore_client),
 ):
     """Retrieves a paginated list of the user's meals."""
@@ -287,7 +291,7 @@ async def get_meal_list(
 @router.get("/stream")
 async def stream_meal_updates(
     request: Request,
-    current_user: User = Depends(get_current_user),
+    current_user: AuthUser = Depends(get_current_user),
 ):
     """
     Creates an SSE stream using FastAPI's StreamingResponse to notify the
@@ -322,7 +326,7 @@ async def stream_meal_updates(
 @router.get("/{meal_id}", response_model=MealDB)
 async def get_meal_by_id(
     meal_id: str,
-    current_user: User = Depends(get_current_user),
+    current_user: AuthUser = Depends(get_current_user),
     db: AsyncClient = Depends(get_firestore_client),
 ):
     """Retrieves a specific meal by its ID."""
@@ -363,7 +367,7 @@ async def get_meal_by_id(
 async def update_meal_type(
     meal_id: str,
     request: UpdateMealTypeRequest,
-    current_user: User = Depends(get_current_user),
+    current_user: AuthUser = Depends(get_current_user),
     db: AsyncClient = Depends(get_firestore_client),
 ):
     """
@@ -445,7 +449,7 @@ async def add_component_to_meal(
     meal_id: str,
     request: AddComponentRequest,
     background_tasks: BackgroundTasks,
-    current_user: User = Depends(get_current_user),
+    current_user: AuthUser = Depends(get_current_user),
     db: AsyncClient = Depends(get_firestore_client),
 ):
     """Adds a component to a meal's 'data', updating it in the background."""
@@ -490,7 +494,7 @@ async def add_component_to_meal(
 async def remove_component_from_meal(
     meal_id: str,
     component_id: str,
-    current_user: User = Depends(get_current_user),
+    current_user: AuthUser = Depends(get_current_user),
     db: AsyncClient = Depends(get_firestore_client),
 ):
     """Removes a component from a meal's 'data' field synchronously."""
@@ -536,7 +540,7 @@ async def remove_component_from_meal(
 @router.delete("/{meal_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_meal(
     meal_id: str,
-    current_user: User = Depends(get_current_user),
+    current_user: AuthUser = Depends(get_current_user),
     db: AsyncClient = Depends(get_firestore_client),
 ):
     """Deletes a meal from Firestore."""

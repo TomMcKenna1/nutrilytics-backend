@@ -10,9 +10,9 @@ from pydantic import ValidationError
 
 from app.api.deps import get_current_user
 from app.db.firebase import get_firestore_client
-from app.models.meal import MealDB, MealGenerationStatus
-from app.models.user import User
-from app.schemas.metric_request import DailySummary, NutrientSummary, SevenDayResponse
+from app.models.meal import MealDB, MealGenerationStatus, ComponentType
+from app.models.user import AuthUser
+from app.schemas.metric_request import DailySummary, NutrientSummary, SevenDayResponse, WeeklyBreakdown
 from meal_generator import NutrientProfile, MealType
 
 logger = logging.getLogger(__name__)
@@ -30,7 +30,7 @@ async def get_daily_nutrition_summary(
         description="The date for the summary in YYYY-MM-DD format. Defaults to today (UTC).",
         alias="date",
     ),
-    current_user: User = Depends(get_current_user),
+    current_user: AuthUser = Depends(get_current_user),
     db: AsyncClient = Depends(get_firestore_client),
 ):
     """
@@ -80,13 +80,16 @@ async def get_daily_nutrition_summary(
         try:
             meal = MealDB.model_validate(doc.to_dict())
             if meal.data:
-                match meal.data.type:
-                    case MealType.MEAL:
-                        meal_count += 1
-                    case MealType.SNACK:
-                        snack_count += 1
-                    case MealType.BEVERAGE:
-                        beverage_count += 1
+                if meal.data.type == MealType.MEAL:
+                    meal_count += 1
+                elif meal.data.type == MealType.SNACK:
+                    snack_count += 1
+
+                if meal.data.components:
+                    for component in meal.data.components:
+                        if component.type == ComponentType.BEVERAGE:
+                            beverage_count += 1
+                
                 profiles.append(
                     NutrientProfile(**meal.data.nutrient_profile.model_dump())
                 )
@@ -129,15 +132,15 @@ async def get_macros_by_day(
         description="The start date for the 7-day period in YYYY-MM-DD format. Defaults to the last Monday.",
         alias="startDate",
     ),
-    current_user: User = Depends(get_current_user),
+    current_user: AuthUser = Depends(get_current_user),
     db: AsyncClient = Depends(get_firestore_client),
 ):
     """
-    Provides a daily nutritional summary for a 7-day period.
+    Provides a daily nutritional summary for a 7-day period, broken down by meal type.
 
     The summary is calculated by querying all 'complete' meals for the user
     within the 7-day UTC window and aggregating their nutrient profiles for each day.
-    Dates with no meals will have a null value.
+    Dates with no meals will have a null value for that day.
     """
     if start_date:
         target_start_date = start_date
@@ -172,10 +175,16 @@ async def get_macros_by_day(
             detail="A database error occurred while fetching meal data.",
         )
 
-    daily_totals: Dict[str, NutrientProfile] = {
-        (target_start_date + timedelta(days=i)).isoformat(): NutrientProfile()
+    # Initialize a dictionary to hold nutrient totals for each category within each day
+    daily_totals: Dict[str, Dict[str, NutrientProfile]] = {
+        (target_start_date + timedelta(days=i)).isoformat(): {
+            "meals": NutrientProfile(),
+            "snacks": NutrientProfile(),
+            "beverages": NutrientProfile(),
+        }
         for i in range(7)
     }
+
     for doc in docs:
         try:
             meal = MealDB.model_validate(doc.to_dict())
@@ -183,15 +192,30 @@ async def get_macros_by_day(
                 meal_date_str = meal.created_at.date().isoformat()
                 if meal_date_str in daily_totals:
                     profile = NutrientProfile(**meal.data.nutrient_profile.model_dump())
-                    daily_totals[meal_date_str] += profile
+                    
+                    # Aggregate nutrients based on the meal's top-level type
+                    match meal.data.type:
+                        case MealType.MEAL:
+                            daily_totals[meal_date_str]["meals"] += profile
+                        case MealType.SNACK:
+                            daily_totals[meal_date_str]["snacks"] += profile
+                        case MealType.BEVERAGE:
+                            daily_totals[meal_date_str]["beverages"] += profile
         except ValidationError as e:
             logger.warning(f"Skipping malformed meal doc '{doc.id}': {e}")
 
-    response_data: Dict[str, Optional[NutrientSummary]] = {}
-    for day_str, total_nutrients in daily_totals.items():
-        if total_nutrients == NutrientProfile():
+    # Build the final response structure
+    response_data: Dict[str, Optional[WeeklyBreakdown]] = {}
+    for day_str, totals in daily_totals.items():
+        is_empty = all(p == NutrientProfile() for p in totals.values())
+
+        if is_empty:
             response_data[day_str] = None
         else:
-            response_data[day_str] = NutrientSummary(**total_nutrients.as_dict())
+            response_data[day_str] = WeeklyBreakdown(
+                meals=NutrientSummary(**totals["meals"].as_dict()) if totals["meals"] != NutrientProfile() else None,
+                snacks=NutrientSummary(**totals["snacks"].as_dict()) if totals["snacks"] != NutrientProfile() else None,
+                beverages=NutrientSummary(**totals["beverages"].as_dict()) if totals["beverages"] != NutrientProfile() else None,
+            )
 
     return SevenDayResponse(root=response_data)

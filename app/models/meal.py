@@ -15,6 +15,13 @@ class MealGenerationStatus(str, enum.Enum):
     PENDING_EDIT = "pending_edit"
 
 
+class ComponentType(str, enum.Enum):
+    """Enumeration for the type of a meal component."""
+
+    FOOD = "food"
+    BEVERAGE = "beverage"
+
+
 class NutrientProfileDB(BaseModel):
     """Defines the nutritional information for a meal or component."""
 
@@ -52,7 +59,13 @@ class MealComponentDB(BaseModel):
     brand: Optional[str] = None
     quantity: str
     total_weight: float
+    type: ComponentType
     nutrient_profile: NutrientProfileDB
+
+    @field_serializer("type")
+    def serialize_component_type(self, component_type: ComponentType, _info):
+        """Converts the ComponentType enum to its string value for serialization."""
+        return component_type.value
 
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 

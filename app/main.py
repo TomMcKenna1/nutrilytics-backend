@@ -5,7 +5,7 @@ import redis.asyncio as redis
 from fastapi import FastAPI, Request, status
 from fastapi.responses import JSONResponse
 
-from app.api.v1 import auth as auth_v1, meals, metrics, user
+from app.api.v1 import account, auth as auth_v1, meals, metrics
 from app.core.config import settings
 from app.db.firebase import initialize_firebase
 
@@ -58,7 +58,7 @@ async def generic_exception_handler(request: Request, exc: Exception):
 app.include_router(auth_v1.router, prefix="/api/v1/auth", tags=["auth"])
 app.include_router(meals.router, prefix="/api/v1/meals", tags=["meals"])
 app.include_router(metrics.router, prefix="/api/v1/metrics", tags=["metrics"])
-app.include_router(user.router, prefix="/api/v1/user", tags=["user"])
+app.include_router(account.router, prefix="/api/v1/account", tags=["account"])
 
 
 @app.get("/", tags=["Root"])

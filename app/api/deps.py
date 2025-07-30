@@ -7,7 +7,7 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from firebase_admin import auth
 
 from app.db.firebase import get_firebase_auth
-from app.models.user import User
+from app.models.user import AuthUser
 
 logger = logging.getLogger(__name__)
 bearer_scheme = HTTPBearer()
@@ -57,7 +57,7 @@ def verify_token_and_get_user_data(token: str, firebase_auth: auth) -> dict:
 async def get_current_user(
     cred: HTTPAuthorizationCredentials = Depends(bearer_scheme),
     firebase_auth: auth = Depends(get_auth_dependency),
-) -> User:
+) -> AuthUser:
     """
     Validates a Firebase ID token using a local TTL cache and returns the
     corresponding User model.
@@ -70,8 +70,7 @@ async def get_current_user(
 
     token = cred.credentials
     decoded_token = verify_token_and_get_user_data(token, firebase_auth)
-
-    return User(
+    return AuthUser(
         uid=decoded_token["uid"],
         email=decoded_token.get("email"),
         name=decoded_token.get("name"),
