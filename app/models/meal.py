@@ -91,12 +91,10 @@ class GeneratedMeal(BaseModel):
 
 class MealDB(BaseModel):
     """
-    Represents the main meal document stored in Firestore. It contains metadata
-    and the nested 'data' field for the generated meal content.
+    Represents the main meal document stored in a user's `mealLogs` subcollection.
     """
 
     id: str
-    uid: str
     original_input: str
     status: MealGenerationStatus
     created_at: Any

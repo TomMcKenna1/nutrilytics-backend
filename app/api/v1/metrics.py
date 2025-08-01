@@ -41,12 +41,8 @@ async def get_daily_nutrition_summary(
     db: AsyncClient = Depends(get_firestore_client),
 ):
     """
-    Provides a daily nutritional summary for the authenticated user.
-
-    The summary is calculated by querying all meals for the user within the
-    24-hour UTC window of the target date and aggregating their nutrient profiles.
-    Only meals with a 'complete' status are included. Malformed or incomplete
-    meal records in the database are logged and skipped.
+    Provides a daily nutritional summary for the authenticated user by querying
+    their dedicated meal logs subcollection.
     """
     target_date = request_date if request_date else datetime.now(timezone.utc).date()
     logger.info(
@@ -57,10 +53,11 @@ async def get_daily_nutrition_summary(
     end_of_day_utc = datetime.combine(target_date, time.max, tzinfo=timezone.utc)
 
     try:
-        meals_ref = db.collection("meals")
+        meals_ref = (
+            db.collection("users").document(current_user.uid).collection("mealLogs")
+        )
         query = (
-            meals_ref.where(filter=FieldFilter("uid", "==", current_user.uid))
-            .where(filter=FieldFilter("createdAt", ">=", start_of_day_utc))
+            meals_ref.where(filter=FieldFilter("createdAt", ">=", start_of_day_utc))
             .where(filter=FieldFilter("createdAt", "<=", end_of_day_utc))
             .where(
                 filter=FieldFilter("status", "==", MealGenerationStatus.COMPLETE.value)
@@ -85,7 +82,7 @@ async def get_daily_nutrition_summary(
 
     for doc in docs:
         try:
-            meal = MealDB.model_validate(doc.to_dict())
+            meal = MealDB.model_validate({"id": doc.id, **doc.to_dict()})
             if meal.data:
                 if meal.data.type == MealType.MEAL:
                     meal_count += 1
@@ -96,7 +93,6 @@ async def get_daily_nutrition_summary(
                     for component in meal.data.components:
                         if component.type == ComponentType.BEVERAGE:
                             beverage_count += 1
-
                 profiles.append(
                     NutrientProfile(**meal.data.nutrient_profile.model_dump())
                 )
@@ -113,18 +109,15 @@ async def get_daily_nutrition_summary(
         )
 
     total_nutrients = sum(profiles, NutrientProfile())
-
     summary = DailySummary(
         meal_count=meal_count,
         snack_count=snack_count,
         beverage_count=beverage_count,
         **total_nutrients.as_dict(),
     )
-
     logger.info(
         f"Aggregated {len(profiles)} valid meals for user '{current_user.uid}' on {target_date}."
     )
-
     return summary
 
 
@@ -142,13 +135,7 @@ async def get_macros_by_day(
     current_user: AuthUser = Depends(get_current_user),
     db: AsyncClient = Depends(get_firestore_client),
 ):
-    """
-    Provides a daily nutritional summary for a 7-day period, broken down by meal type.
-
-    The summary is calculated by querying all 'complete' meals for the user
-    within the 7-day UTC window and aggregating their nutrient profiles for each day.
-    Dates with no meals will have a null value for that day.
-    """
+    """Provides a daily nutritional summary for a 7-day period, broken down by meal type."""
     if start_date:
         target_start_date = start_date
     else:
@@ -163,10 +150,11 @@ async def get_macros_by_day(
     end_of_period_utc = datetime.combine(end_date, time.max, tzinfo=timezone.utc)
 
     try:
-        meals_ref = db.collection("meals")
+        meals_ref = (
+            db.collection("users").document(current_user.uid).collection("mealLogs")
+        )
         query = (
-            meals_ref.where(filter=FieldFilter("uid", "==", current_user.uid))
-            .where(filter=FieldFilter("createdAt", ">=", start_of_period_utc))
+            meals_ref.where(filter=FieldFilter("createdAt", ">=", start_of_period_utc))
             .where(filter=FieldFilter("createdAt", "<=", end_of_period_utc))
             .where(
                 filter=FieldFilter("status", "==", MealGenerationStatus.COMPLETE.value)
@@ -182,7 +170,6 @@ async def get_macros_by_day(
             detail="A database error occurred while fetching meal data.",
         )
 
-    # Initialize a dictionary to hold nutrient totals for each category within each day
     daily_totals: Dict[str, Dict[str, NutrientProfile]] = {
         (target_start_date + timedelta(days=i)).isoformat(): {
             "meals": NutrientProfile(),
@@ -194,13 +181,11 @@ async def get_macros_by_day(
 
     for doc in docs:
         try:
-            meal = MealDB.model_validate(doc.to_dict())
+            meal = MealDB.model_validate({"id": doc.id, **doc.to_dict()})
             if meal.data and meal.data.nutrient_profile and meal.created_at:
                 meal_date_str = meal.created_at.date().isoformat()
                 if meal_date_str in daily_totals:
                     profile = NutrientProfile(**meal.data.nutrient_profile.model_dump())
-
-                    # Aggregate nutrients based on the meal's top-level type
                     match meal.data.type:
                         case MealType.MEAL:
                             daily_totals[meal_date_str]["meals"] += profile
@@ -211,11 +196,9 @@ async def get_macros_by_day(
         except ValidationError as e:
             logger.warning(f"Skipping malformed meal doc '{doc.id}': {e}")
 
-    # Build the final response structure
     response_data: Dict[str, Optional[WeeklyBreakdown]] = {}
     for day_str, totals in daily_totals.items():
         is_empty = all(p == NutrientProfile() for p in totals.values())
-
         if is_empty:
             response_data[day_str] = None
         else:
@@ -236,7 +219,6 @@ async def get_macros_by_day(
                     else None
                 ),
             )
-
     return SevenDayResponse(root=response_data)
 
 
@@ -251,13 +233,7 @@ async def get_monthly_nutrition_summary(
     current_user: AuthUser = Depends(get_current_user),
     db: AsyncClient = Depends(get_firestore_client),
 ):
-    """
-    Provides a daily nutritional summary for a specified month (YYYY-MM).
-
-    The summary is calculated by querying all 'complete' meals for the user
-    within the given month and aggregating their nutrient profiles for each day.
-    Months in the future are not permitted.
-    """
+    """Provides a daily nutritional summary for a specified month (YYYY-MM)."""
     try:
         requested_month_dt = datetime.strptime(year_month, "%Y-%m")
     except ValueError:
@@ -266,10 +242,8 @@ async def get_monthly_nutrition_summary(
             detail="Invalid year_month format. Please use YYYY-MM.",
         )
 
-    # Disallow requests for future months
     current_date = datetime.now(timezone.utc).date()
     first_day_of_current_month = current_date.replace(day=1)
-
     if requested_month_dt.date().replace(day=1) > first_day_of_current_month:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -277,7 +251,6 @@ async def get_monthly_nutrition_summary(
         )
 
     start_of_month = requested_month_dt.replace(tzinfo=timezone.utc)
-    # Find the last day of the month
     next_month = start_of_month.replace(day=28) + timedelta(days=4)
     end_of_month = next_month - timedelta(days=next_month.day)
     end_of_period_utc = datetime.combine(
@@ -285,10 +258,11 @@ async def get_monthly_nutrition_summary(
     )
 
     try:
-        meals_ref = db.collection("meals")
+        meals_ref = (
+            db.collection("users").document(current_user.uid).collection("mealLogs")
+        )
         query = (
-            meals_ref.where(filter=FieldFilter("uid", "==", current_user.uid))
-            .where(filter=FieldFilter("createdAt", ">=", start_of_month))
+            meals_ref.where(filter=FieldFilter("createdAt", ">=", start_of_month))
             .where(filter=FieldFilter("createdAt", "<=", end_of_period_utc))
             .where(
                 filter=FieldFilter("status", "==", MealGenerationStatus.COMPLETE.value)
@@ -305,27 +279,23 @@ async def get_monthly_nutrition_summary(
         )
 
     daily_data: Dict[str, Dict] = {}
-
     for doc in docs:
         try:
-            meal = MealDB.model_validate(doc.to_dict())
+            meal = MealDB.model_validate({"id": doc.id, **doc.to_dict()})
             if meal.data and meal.created_at:
                 meal_date_str = meal.created_at.date().isoformat()
-
                 if meal_date_str not in daily_data:
                     daily_data[meal_date_str] = {
                         "meal_count": 0,
                         "nutrition": NutrientProfile(),
                         "logs": [],
                     }
-
                 daily_data[meal_date_str]["nutrition"] += NutrientProfile(
                     **meal.data.nutrient_profile.model_dump()
                 )
                 if meal.data.type == MealType.MEAL:
                     daily_data[meal_date_str]["meal_count"] += 1
                     daily_data[meal_date_str]["logs"].append(meal.data.name)
-
         except ValidationError as e:
             logger.warning(f"Skipping malformed meal doc '{doc.id}': {e}")
 
@@ -342,5 +312,4 @@ async def get_monthly_nutrition_summary(
             )
         else:
             response_data[current_date] = None
-
     return MonthlySummaryResponse(root=response_data)

@@ -21,7 +21,7 @@ router = APIRouter()
     response_model=UserInDB,
     status_code=status.HTTP_201_CREATED,
     summary="Create User Record",
-    description="Creates a basic user record in Firestore after initial auth sign-up. This marks the user's status as 'onboarding incomplete'.",
+    description="Creates a basic user record in Firestore after initial auth sign-up.",
 )
 async def create_user_record(
     current_user: AuthUser = Depends(get_current_user),
@@ -37,24 +37,22 @@ async def create_user_record(
                 detail="A record for this user already exists.",
             )
 
-        # Create a user with no profile/targets and onboarding set to false
         user_data = {
-            "uid": current_user.uid,
             "email": current_user.email,
             "name": current_user.name,
             "createdAt": datetime.now(timezone.utc),
-            "profile": None,
-            "nutritionTargets": {},
             "onboardingComplete": False,
             "logStreak": 0,
             "lastActivityAt": None,
+            "currentWeightKg": None,
+            "profile": None,
+            "nutritionTargets": {},
         }
-
         await user_doc_ref.set(user_data)
         logger.info(f"Successfully created record for user '{current_user.uid}'.")
 
         created_doc = await user_doc_ref.get()
-        return UserInDB(**created_doc.to_dict())
+        return UserInDB(uid=created_doc.id, **created_doc.to_dict())
 
     except (google_exceptions.GoogleAPICallError, google_exceptions.RetryError) as e:
         logger.error(f"Firestore error creating record for '{current_user.uid}': {e}")
@@ -69,7 +67,7 @@ async def create_user_record(
     response_model=UserInDB,
     status_code=status.HTTP_200_OK,
     summary="Complete User Onboarding",
-    description="Sets the user's initial profile and nutrition targets, and marks onboarding as complete.",
+    description="Sets initial profile and targets, and marks onboarding as complete.",
 )
 async def onboard_user(
     payload: OnboardingRequest,
@@ -98,13 +96,14 @@ async def onboard_user(
                 by_alias=True, exclude_unset=True
             ),
             "onboardingComplete": True,
+            "currentWeightKg": payload.profile.weight_kg,
         }
 
         await user_doc_ref.update(update_data)
         logger.info(f"Successfully onboarded user '{current_user.uid}'.")
 
         updated_doc = await user_doc_ref.get()
-        return UserInDB(**updated_doc.to_dict())
+        return UserInDB(uid=updated_doc.id, **updated_doc.to_dict())
 
     except (google_exceptions.GoogleAPICallError, google_exceptions.RetryError) as e:
         logger.error(f"Firestore error during onboarding for '{current_user.uid}': {e}")
@@ -112,10 +111,6 @@ async def onboard_user(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="A database error occurred.",
         )
-
-
-# The GET, PUT /, and PUT/GET /targets endpoints remain unchanged as they are still useful
-# for retrieving or making partial updates after onboarding is complete.
 
 
 @router.get(
@@ -129,7 +124,6 @@ async def get_user_profile(
     db: AsyncClient = Depends(get_firestore_client),
 ):
     """Retrieves the full profile for the authenticated user."""
-    # This function remains valid
     logger.info(f"Retrieving profile for user '{current_user.uid}'.")
     user_doc_ref = db.collection("users").document(current_user.uid)
     try:
@@ -138,7 +132,7 @@ async def get_user_profile(
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND, detail="User profile not found."
             )
-        return UserInDB(**doc.to_dict())
+        return UserInDB(uid=doc.id, **doc.to_dict())
     except (google_exceptions.GoogleAPICallError, google_exceptions.RetryError) as e:
         logger.error(f"Firestore error getting profile for '{current_user.uid}': {e}")
         raise HTTPException(
@@ -158,8 +152,7 @@ async def update_user_profile(
     current_user: AuthUser = Depends(get_current_user),
     db: AsyncClient = Depends(get_firestore_client),
 ):
-    """Updates one or more fields in the user's profile (sex, age, height, etc.)."""
-    # This function remains valid
+    """Updates non-weight fields in the user's profile (sex, age, height, etc.)."""
     logger.info(f"Updating profile for user '{current_user.uid}'.")
     update_data = profile_update.model_dump(exclude_unset=True, by_alias=True)
     if not update_data:
@@ -173,7 +166,7 @@ async def update_user_profile(
         await user_doc_ref.update({f"profile.{k}": v for k, v in update_data.items()})
         logger.info(f"Successfully updated profile for '{current_user.uid}'.")
         updated_doc = await user_doc_ref.get()
-        return UserInDB(**updated_doc.to_dict())
+        return UserInDB(uid=updated_doc.id, **updated_doc.to_dict())
     except (google_exceptions.GoogleAPICallError, google_exceptions.RetryError) as e:
         logger.error(f"Firestore error updating profile for '{current_user.uid}': {e}")
         raise HTTPException(

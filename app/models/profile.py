@@ -25,12 +25,14 @@ class ActivityLevel(str, Enum):
 
 
 class UserProfileBase(BaseModel):
-    """Base model for user profile data, allowing for partial updates."""
+    """
+    Base model for user profile data, allowing for partial updates.
+    Weight is excluded as it should be updated via a separate logging mechanism.
+    """
 
     sex: Optional[Sex] = None
     age: Optional[int] = Field(default=None, ge=13, le=120)
     height_cm: Optional[float] = Field(default=None, alias="heightCm", ge=100, le=250)
-    weight_kg: Optional[float] = Field(default=None, alias="weightKg", ge=10, le=500)
     goal: Optional[Goal] = None
     activity_level: Optional[ActivityLevel] = Field(default=None, alias="activityLevel")
 
@@ -46,6 +48,8 @@ class UserProfileCreate(UserProfileBase):
     sex: Sex
     age: int
     height_cm: float = Field(alias="heightCm")
-    weight_kg: float = Field(alias="weightKg")
+    weight_kg: float = Field(
+        alias="weightKg", description="User's initial weight upon onboarding."
+    )
     goal: Goal
     activity_level: ActivityLevel = Field(alias="activityLevel")

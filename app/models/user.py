@@ -20,7 +20,7 @@ class AuthUser(BaseModel):
 class UserInDB(BaseModel):
     """Represents the full user document as stored in Firestore."""
 
-    uid: str
+    uid: str # Populated from the document ID, not a field in Firestore
     email: Optional[EmailStr] = None
     name: Optional[str] = None
     created_at: datetime = Field(alias="createdAt")
@@ -31,6 +31,9 @@ class UserInDB(BaseModel):
     )
     log_streak: int = Field(default=0, alias="logStreak")
     last_activity_at: Optional[datetime] = Field(default=None, alias="lastActivityAt")
+    current_weight_kg: Optional[float] = Field(
+        default=None, alias="currentWeightKg", description="The user's most recent weight."
+    )
 
     model_config = ConfigDict(
         alias_generator=to_camel,

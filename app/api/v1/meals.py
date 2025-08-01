@@ -18,7 +18,6 @@ from fastapi import (
 )
 from google.api_core import exceptions as google_exceptions
 from google.cloud.firestore_v1.async_client import AsyncClient
-from google.cloud.firestore_v1.base_query import FieldFilter
 from google.cloud.firestore_v1.query import Query as FirestoreQuery
 from firebase_admin import firestore
 
@@ -52,11 +51,6 @@ from meal_generator import (
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-# In-memory Pub/Sub notifier - This would probably work for 10000ish users
-# but would need to change to something like redis pub/sub to scale (maybe
-# move to websockets aswell for reliable crossway communication)
-
-
 class Notifier:
     """Manages active SSE listeners and broadcasts messages."""
 
@@ -64,7 +58,6 @@ class Notifier:
         self.listeners: Dict[str, List[asyncio.Queue]] = defaultdict(list)
 
     def subscribe(self, user_id: str) -> asyncio.Queue:
-        """Adds a new queue to the user's list of listeners and returns it."""
         queue = asyncio.Queue()
         self.listeners[user_id].append(queue)
         logger.info(
@@ -73,7 +66,6 @@ class Notifier:
         return queue
 
     def unsubscribe(self, user_id: str, queue: asyncio.Queue):
-        """Removes a queue from the user's list of listeners."""
         if user_id in self.listeners:
             self.listeners[user_id].remove(queue)
             if not self.listeners[user_id]:
@@ -81,7 +73,6 @@ class Notifier:
             logger.info(f"User '{user_id}' unsubscribed.")
 
     async def publish(self, user_id: str, message: Any):
-        """Puts a message into all active queues for a given user."""
         if user_id in self.listeners:
             logger.info(
                 f"Publishing update to {len(self.listeners[user_id])} listeners for user '{user_id}'"
@@ -90,7 +81,6 @@ class Notifier:
                 await queue.put(message)
 
 
-# Create a single, shared instance of the Notifier
 notifier = Notifier()
 
 
@@ -146,11 +136,15 @@ def _convert_business_logic_meal_to_db_model(
     )
 
 
+def _get_meal_logs_collection(db: AsyncClient, user_id: str):
+    return db.collection("users").document(user_id).collection("mealLogs")
+
+
 async def _generate_and_update_meal(
     db: AsyncClient, meal_id: str, description: str, user_id: str
 ):
     """Generates meal data, updates Firestore, and publishes a notification."""
-    meal_ref = db.collection("meals").document(meal_id)
+    meal_ref = _get_meal_logs_collection(db, user_id).document(meal_id)
     update_payload = {}
     try:
         business_meal = await meal_generator.generate_meal_async(description)
@@ -166,7 +160,7 @@ async def _generate_and_update_meal(
     finally:
         await meal_ref.update(update_payload)
         updated_doc = await meal_ref.get()
-        meal = MealDB(**updated_doc.to_dict())
+        meal = MealDB(id=updated_doc.id, **updated_doc.to_dict())
         await notifier.publish(user_id, meal)
 
 
@@ -174,12 +168,12 @@ async def _add_component_and_update_firestore(
     db: AsyncClient, meal_id: str, description: str, user_id: str
 ):
     """Adds a component, updates Firestore, and publishes a notification."""
-    meal_ref = db.collection("meals").document(meal_id)
+    meal_ref = _get_meal_logs_collection(db, user_id).document(meal_id)
     try:
         meal_doc = await meal_ref.get()
         if not meal_doc.exists:
             return
-        meal_db = MealDB(**meal_doc.to_dict())
+        meal_db = MealDB(id=meal_doc.id, **meal_doc.to_dict())
         if not meal_db.data:
             raise MealGenerationError("Cannot add component, meal data is missing.")
         business_meal = _convert_db_data_to_business_logic_meal(meal_db.data)
@@ -203,32 +197,37 @@ async def _add_component_and_update_firestore(
         )
     finally:
         updated_doc = await meal_ref.get()
-        meal = MealDB(**updated_doc.to_dict())
+        meal = MealDB(id=updated_doc.id, **updated_doc.to_dict())
         await notifier.publish(user_id, meal)
 
 
-async def update_streak(db, current_user):
+async def update_streak(db: AsyncClient, current_user: AuthUser):
     user_doc_ref = db.collection("users").document(current_user.uid)
-    user_doc = await user_doc_ref.get()
+    try:
+        user_doc = await user_doc_ref.get()
+        if user_doc.exists:
+            user = UserInDB(uid=user_doc.id, **user_doc.to_dict())
+            now = datetime.now(timezone.utc)
+            today = now.date()
+            new_streak = user.log_streak
 
-    if user_doc.exists:
-        user = UserInDB(**user_doc.to_dict())
-        now = datetime.now(timezone.utc)
-        today = now.date()
-        new_streak = user.log_streak
-
-        if user.last_activity_at is None:
-            new_streak = 1
-        else:
-            last_activity_date = user.last_activity_at.date()
-            if last_activity_date < today:
-                if last_activity_date == today - timedelta(days=1):
-                    new_streak += 1
-                else:
-                    new_streak = 1
-
-        await user_doc_ref.update({"logStreak": new_streak, "lastActivityAt": now})
-        logger.info(f"Updated streak for user '{current_user.uid}' to {new_streak}.")
+            if user.last_activity_at is None:
+                new_streak = 1
+            else:
+                last_activity_date = user.last_activity_at.date()
+                if last_activity_date < today:
+                    if last_activity_date == today - timedelta(days=1):
+                        new_streak += 1
+                    else:
+                        new_streak = 1
+            await user_doc_ref.update({"logStreak": new_streak, "lastActivityAt": now})
+            logger.info(
+                f"Updated streak for user '{current_user.uid}' to {new_streak}."
+            )
+    except (google_exceptions.GoogleAPICallError, google_exceptions.RetryError) as e:
+        logger.error(
+            f"Firestore error updating streak for user '{current_user.uid}': {e}"
+        )
 
 
 @router.post("/", status_code=status.HTTP_202_ACCEPTED, response_model=MealDB)
@@ -241,15 +240,13 @@ async def create_meal(
     """Creates a placeholder meal and starts the generation in the background."""
     await update_streak(db, current_user)
 
-    doc_ref = db.collection("meals").document()
+    doc_ref = _get_meal_logs_collection(db, current_user.uid).document()
     meal_placeholder = MealDB(
         id=doc_ref.id,
-        uid=current_user.uid,
         original_input=request.description,
         status=MealGenerationStatus.PENDING,
         created_at=firestore.SERVER_TIMESTAMP,
     )
-
     try:
         await doc_ref.set(meal_placeholder.model_dump(by_alias=True, exclude_none=True))
         background_tasks.add_task(
@@ -259,9 +256,8 @@ async def create_meal(
             request.description,
             current_user.uid,
         )
-
         new_meal_doc = await doc_ref.get()
-        return MealDB(**new_meal_doc.to_dict())
+        return MealDB(id=new_meal_doc.id, **new_meal_doc.to_dict())
     except (google_exceptions.GoogleAPICallError, google_exceptions.RetryError) as e:
         logger.error(
             f"Firestore error creating meal for user '{current_user.uid}': {e}",
@@ -281,13 +277,10 @@ async def get_meal_list(
 ):
     """Retrieves a paginated list of the user's meals."""
     try:
-        meals_ref = db.collection("meals")
-        query = (
-            meals_ref.where(filter=FieldFilter("uid", "==", user.uid))
-            .order_by("createdAt", direction=FirestoreQuery.DESCENDING)
-            .order_by("id", direction=FirestoreQuery.DESCENDING)
-        )
-
+        meals_ref = _get_meal_logs_collection(db, user.uid)
+        query = meals_ref.order_by(
+            "createdAt", direction=FirestoreQuery.DESCENDING
+        ).order_by("id", direction=FirestoreQuery.DESCENDING)
         if next_cursor:
             last_doc = await meals_ref.document(next_cursor).get()
             if not last_doc.exists:
@@ -296,7 +289,6 @@ async def get_meal_list(
                     detail="Invalid 'next' cursor.",
                 )
             query = query.start_after(last_doc)
-
         docs = await query.limit(limit).get()
     except (google_exceptions.GoogleAPICallError, google_exceptions.RetryError) as e:
         logger.error(
@@ -307,18 +299,14 @@ async def get_meal_list(
             detail="Database error fetching meals.",
         )
 
-    meals_list = [MealDB(**doc.to_dict()) for doc in docs]
-
+    meals_list = [MealDB(id=doc.id, **doc.to_dict()) for doc in docs]
     next_page_cursor = docs[-1].id if len(docs) == limit else None
-    final_response = MealListResponse(meals=meals_list, next=next_page_cursor)
-
-    return final_response
+    return MealListResponse(meals=meals_list, next=next_page_cursor)
 
 
 @router.get("/stream")
 async def stream_meal_updates(
-    request: Request,
-    current_user: AuthUser = Depends(get_current_user),
+    request: Request, current_user: AuthUser = Depends(get_current_user)
 ):
     """
     Creates an SSE stream using FastAPI's StreamingResponse to notify the
@@ -356,10 +344,10 @@ async def get_meal_by_id(
     current_user: AuthUser = Depends(get_current_user),
     db: AsyncClient = Depends(get_firestore_client),
 ):
-    """Retrieves a specific meal by its ID."""
+    """Retrieves a specific meal by its ID from the user's subcollection."""
     logger.info(f"User '{current_user.uid}' requesting meal '{meal_id}'.")
     try:
-        doc_ref = db.collection("meals").document(meal_id)
+        doc_ref = _get_meal_logs_collection(db, current_user.uid).document(meal_id)
         meal_doc = await doc_ref.get()
     except (google_exceptions.GoogleAPICallError, google_exceptions.RetryError) as e:
         logger.error(f"Firestore error fetching meal '{meal_id}': {e}", exc_info=True)
@@ -373,15 +361,8 @@ async def get_meal_by_id(
             status_code=status.HTTP_404_NOT_FOUND, detail="Meal not found"
         )
 
-    meal_data = meal_doc.to_dict()
-    if meal_data.get("uid") != current_user.uid:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Not authorized to access this meal",
-        )
-
     try:
-        return MealDB(**meal_data)
+        return MealDB(id=meal_doc.id, **meal_doc.to_dict())
     except ValidationError as e:
         logger.error(f"Meal '{meal_id}' has invalid format in DB: {e}", exc_info=True)
         raise HTTPException(
@@ -397,21 +378,10 @@ async def update_meal_type(
     current_user: AuthUser = Depends(get_current_user),
     db: AsyncClient = Depends(get_firestore_client),
 ):
-    """
-    Updates the 'type' of a specific meal.
-
-    This endpoint allows an authenticated user to change the meal type
-    (e.g., from 'Breakfast' to 'Lunch') for one of their existing meals.
-    The meal must be in a 'complete' state to be modified.
-    """
-    logger.info(
-        f"User '{current_user.uid}' attempting to update meal type for '{meal_id}' to '{request.type.value}'."
-    )
-    meal_ref = db.collection("meals").document(meal_id)
-
+    """Updates the 'type' of a specific meal in the user's subcollection."""
+    meal_ref = _get_meal_logs_collection(db, current_user.uid).document(meal_id)
     try:
         meal_doc = await meal_ref.get()
-
         if not meal_doc.exists:
             logger.warning(
                 f"User '{current_user.uid}' failed to update non-existent meal '{meal_id}'."
@@ -420,17 +390,7 @@ async def update_meal_type(
                 status_code=status.HTTP_404_NOT_FOUND, detail="Meal not found"
             )
 
-        meal_data = meal_doc.to_dict()
-        if meal_data.get("uid") != current_user.uid:
-            logger.warning(
-                f"Forbidden attempt by user '{current_user.uid}' to update meal '{meal_id}'."
-            )
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Not authorised to modify this meal",
-            )
-
-        meal = MealDB(**meal_data)
+        meal = MealDB(id=meal_doc.id, **meal_doc.to_dict())
         if meal.status != MealGenerationStatus.COMPLETE or not meal.data:
             logger.error(
                 f"Attempt to update meal '{meal_id}' in non-complete state: {meal.status}."
@@ -441,15 +401,11 @@ async def update_meal_type(
             )
 
         await meal_ref.update({"data.type": request.type.value})
-
-        updated_doc = await meal_ref.get()
-        updated_meal = MealDB(**updated_doc.to_dict())
-
         logger.info(
             f"Successfully updated meal type for '{meal_id}' for user '{current_user.uid}'."
         )
-        return updated_meal
-
+        updated_doc = await meal_ref.get()
+        return MealDB(id=updated_doc.id, **updated_doc.to_dict())
     except (google_exceptions.GoogleAPICallError, google_exceptions.RetryError) as e:
         logger.error(
             f"Firestore error updating meal type for '{meal_id}': {e}", exc_info=True
@@ -480,19 +436,14 @@ async def add_component_to_meal(
     db: AsyncClient = Depends(get_firestore_client),
 ):
     """Adds a component to a meal's 'data', updating it in the background."""
-    meal_ref = db.collection("meals").document(meal_id)
+    meal_ref = _get_meal_logs_collection(db, current_user.uid).document(meal_id)
     meal_doc = await meal_ref.get()
     if not meal_doc.exists:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Meal not found"
         )
 
-    meal = MealDB(**meal_doc.to_dict())
-    if meal.uid != current_user.uid:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Not authorized to modify this meal",
-        )
+    meal = MealDB(id=meal_doc.id, **meal_doc.to_dict())
     if meal.status != MealGenerationStatus.COMPLETE or not meal.data:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -500,7 +451,6 @@ async def add_component_to_meal(
         )
 
     await meal_ref.update({"status": MealGenerationStatus.PENDING_EDIT.value})
-
     background_tasks.add_task(
         _add_component_and_update_firestore,
         db,
@@ -508,7 +458,6 @@ async def add_component_to_meal(
         request.description,
         current_user.uid,
     )
-
     meal.status = MealGenerationStatus.PENDING_EDIT
     return meal
 
@@ -525,7 +474,7 @@ async def remove_component_from_meal(
     db: AsyncClient = Depends(get_firestore_client),
 ):
     """Removes a component from a meal's 'data' field synchronously."""
-    meal_ref = db.collection("meals").document(meal_id)
+    meal_ref = _get_meal_logs_collection(db, current_user.uid).document(meal_id)
     try:
         meal_doc = await meal_ref.get()
         if not meal_doc.exists:
@@ -533,11 +482,7 @@ async def remove_component_from_meal(
                 status_code=status.HTTP_404_NOT_FOUND, detail="Meal not found"
             )
 
-        meal = MealDB(**meal_doc.to_dict())
-        if meal.uid != current_user.uid:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized"
-            )
+        meal = MealDB(id=meal_doc.id, **meal_doc.to_dict())
         if meal.status != MealGenerationStatus.COMPLETE or not meal.data:
             raise HTTPException(
                 status_code=409,
@@ -557,7 +502,7 @@ async def remove_component_from_meal(
         updated_data_model = _convert_business_logic_meal_to_db_model(business_meal)
         await meal_ref.update({"data": updated_data_model.model_dump(by_alias=True)})
         updated_doc = await meal_ref.get()
-        return MealDB(**updated_doc.to_dict())
+        return MealDB(id=updated_doc.id, **updated_doc.to_dict())
     except ComponentDoesNotExist:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Component not found in meal."
@@ -570,37 +515,21 @@ async def delete_meal(
     current_user: AuthUser = Depends(get_current_user),
     db: AsyncClient = Depends(get_firestore_client),
 ):
-    """Deletes a meal from Firestore."""
+    """Deletes a meal from the user's subcollection."""
     logger.info(f"User '{current_user.uid}' attempting to delete meal '{meal_id}'.")
-    meal_ref = db.collection("meals").document(meal_id)
-
+    meal_ref = _get_meal_logs_collection(db, current_user.uid).document(meal_id)
     try:
         meal_doc = await meal_ref.get()
-
         if not meal_doc.exists:
             logger.warning(
                 f"Attempt to delete non-existent meal '{meal_id}' by user '{current_user.uid}'. "
             )
             return
-
-        if meal_doc.to_dict().get("uid") != current_user.uid:
-            logger.warning(
-                f"User '{current_user.uid}' forbidden from deleting meal '{meal_id}' owned by another user."
-            )
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Not authorized to delete this meal",
-            )
-
         await meal_ref.delete()
         logger.info(
             f"Successfully deleted meal '{meal_id}' for user '{current_user.uid}'."
         )
-
-    except (
-        google_exceptions.GoogleAPICallError,
-        google_exceptions.RetryError,
-    ) as e:
+    except (google_exceptions.GoogleAPICallError, google_exceptions.RetryError) as e:
         logger.error(f"Firestore error deleting meal '{meal_id}': {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
