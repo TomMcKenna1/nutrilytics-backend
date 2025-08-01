@@ -51,6 +51,7 @@ from meal_generator import (
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
+
 class Notifier:
     """Manages active SSE listeners and broadcasts messages."""
 
@@ -248,7 +249,11 @@ async def create_meal(
         created_at=firestore.SERVER_TIMESTAMP,
     )
     try:
-        await doc_ref.set(meal_placeholder.model_dump(by_alias=True, exclude_none=True))
+        await doc_ref.set(
+            meal_placeholder.model_dump(
+                by_alias=True, exclude={"id"}, exclude_none=True
+            )
+        )
         background_tasks.add_task(
             _generate_and_update_meal,
             db,
@@ -280,7 +285,7 @@ async def get_meal_list(
         meals_ref = _get_meal_logs_collection(db, user.uid)
         query = meals_ref.order_by(
             "createdAt", direction=FirestoreQuery.DESCENDING
-        ).order_by("id", direction=FirestoreQuery.DESCENDING)
+        ).order_by("__name__", direction=FirestoreQuery.DESCENDING)
         if next_cursor:
             last_doc = await meals_ref.document(next_cursor).get()
             if not last_doc.exists:
