@@ -10,7 +10,7 @@ from pydantic import ValidationError
 
 from app.api.deps import get_current_user
 from app.db.firebase import get_firestore_client
-from app.models.meal import MealDB, MealGenerationStatus, ComponentType
+from app.models.meal import DataSource, MealDB, MealGenerationStatus, ComponentType
 from app.models.user import AuthUser
 from app.schemas.metric_request import (
     DailySummary,
@@ -24,6 +24,14 @@ from meal_generator import NutrientProfile, MealType
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+
+def _create_profile_from_db_data(profile_db_model) -> NutrientProfile:
+    """Safely creates a NutrientProfile business object from a DB model."""
+    profile_dump = profile_db_model.model_dump()
+    if "data_source" in profile_dump and isinstance(profile_dump["data_source"], str):
+        profile_dump["data_source"] = DataSource(profile_dump["data_source"])
+    return NutrientProfile(**profile_dump)
 
 
 @router.get(
@@ -92,9 +100,12 @@ async def get_daily_nutrition_summary(
                 if meal.data.components:
                     for component in meal.data.components:
                         if component.type == ComponentType.BEVERAGE:
-                            beverage_count += 1
+                            if component.quantity:
+                                beverage_count += component.quantity
+                            else:
+                                beverage_count += 1
                 profiles.append(
-                    NutrientProfile(**meal.data.nutrient_profile.model_dump())
+                    _create_profile_from_db_data(meal.data.nutrient_profile)
                 )
         except ValidationError as e:
             malformed_docs_count += 1
@@ -185,7 +196,7 @@ async def get_macros_by_day(
             if meal.data and meal.data.nutrient_profile and meal.created_at:
                 meal_date_str = meal.created_at.date().isoformat()
                 if meal_date_str in daily_totals:
-                    profile = NutrientProfile(**meal.data.nutrient_profile.model_dump())
+                    profile = _create_profile_from_db_data(meal.data.nutrient_profile)
                     match meal.data.type:
                         case MealType.MEAL:
                             daily_totals[meal_date_str]["meals"] += profile
@@ -290,8 +301,8 @@ async def get_monthly_nutrition_summary(
                         "nutrition": NutrientProfile(),
                         "logs": [],
                     }
-                daily_data[meal_date_str]["nutrition"] += NutrientProfile(
-                    **meal.data.nutrient_profile.model_dump()
+                daily_data[meal_date_str]["nutrition"] += _create_profile_from_db_data(
+                    meal.data.nutrient_profile
                 )
                 if meal.data.type == MealType.MEAL:
                     daily_data[meal_date_str]["meal_count"] += 1

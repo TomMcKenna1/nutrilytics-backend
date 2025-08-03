@@ -1,5 +1,6 @@
 import logging
-from datetime import datetime, timezone, date
+from datetime import datetime, timedelta, timezone, date
+from typing import List
 from firebase_admin import firestore
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -11,6 +12,7 @@ from app.api.deps import get_current_user
 from app.db.firebase import get_firestore_client
 from app.models.user import AuthUser
 from app.models.weight_log import WeightLogInDB
+from app.schemas.weight_forecast_response import WeightForecastResponse
 from app.schemas.weight_log_request import WeightLogCreate
 
 logger = logging.getLogger(__name__)
@@ -21,6 +23,11 @@ POUNDS_TO_KG_FACTOR = 0.453592
 
 def _get_weight_logs_collection(db: AsyncClient, user_id: str):
     return db.collection("users").document(user_id).collection("weightLogs")
+
+
+def _get_weight_forecast_collection(db: AsyncClient, user_id: str):
+    """Helper to get a reference to the weightForecast subcollection."""
+    return db.collection("users").document(user_id).collection("weightForecast")
 
 
 @router.post(
@@ -120,6 +127,44 @@ async def get_weight_logs(
 
     docs = await query.get()
     return [WeightLogInDB(id=doc.id, **doc.to_dict()) for doc in docs]
+
+
+@router.get(
+    "/forecast",
+    response_model=List[WeightForecastResponse],
+    summary="Get 14-day weight forecast from today",
+)
+async def get_weight_forecast(
+    current_user: AuthUser = Depends(get_current_user),
+    db: AsyncClient = Depends(get_firestore_client),
+):
+    """
+    Retrieves the 14-day weight forecast starting from today.
+    """
+    start_date = datetime.now(timezone.utc).date()
+    end_date = start_date + timedelta(days=13)
+
+    start_utc = datetime.combine(start_date, datetime.min.time(), tzinfo=timezone.utc)
+    end_utc = datetime.combine(end_date, datetime.max.time(), tzinfo=timezone.utc)
+
+    forecast_ref = _get_weight_forecast_collection(db, current_user.uid)
+    query = (
+        forecast_ref.where(filter=FieldFilter("date", ">=", start_utc))
+        .where(filter=FieldFilter("date", "<=", end_utc))
+        .order_by("date")
+    )
+
+    try:
+        docs = await query.get()
+        return [WeightForecastResponse(**doc.to_dict()) for doc in docs]
+    except (google_exceptions.GoogleAPICallError, google_exceptions.RetryError) as e:
+        logger.error(
+            f"Firestore error getting weight forecast for '{current_user.uid}': {e}"
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="A database error occurred while fetching the weight forecast.",
+        )
 
 
 @router.delete(

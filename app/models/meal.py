@@ -22,6 +22,14 @@ class ComponentType(str, enum.Enum):
     BEVERAGE = "beverage"
 
 
+class DataSource(str, enum.Enum):
+    """Enumeration for the origin of nutrient data."""
+
+    RETRIEVED_API = "retrieved_api"
+    ESTIMATED_WITH_CONTEXT = "estimated_with_context"
+    ESTIMATED_MODEL = "estimated_model"
+
+
 class NutrientProfileDB(BaseModel):
     """Defines the nutritional information for a meal or component."""
 
@@ -47,6 +55,12 @@ class NutrientProfileDB(BaseModel):
     contains_high_capsaicin: bool = False
     is_processed: bool = False
     is_ultra_processed: bool = False
+    data_source: DataSource
+
+    @field_serializer("data_source")
+    def serialize_data_source(self, data_source: DataSource, _info):
+        """Converts the DataSource enum to its string value for serialization."""
+        return data_source.value
 
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
@@ -57,10 +71,12 @@ class MealComponentDB(BaseModel):
     id: str
     name: str
     brand: Optional[str] = None
-    quantity: str
+    quantity: float
+    metric: Optional[str] = None
     total_weight: float
     type: ComponentType
     nutrient_profile: NutrientProfileDB
+    source_url: Optional[str] = None
 
     @field_serializer("type")
     def serialize_component_type(self, component_type: ComponentType, _info):
@@ -102,8 +118,8 @@ class MealDB(BaseModel):
     data: Optional[GeneratedMeal] = None
 
     @field_serializer("status")
-    def serialize_meal_type(self, status: MealGenerationStatus, _info):
-        """Converts the MealType enum to its string value for serialization."""
+    def serialize_status(self, status: MealGenerationStatus, _info):
+        """Converts the MealGenerationStatus enum to its string value for serialization."""
         return status.value
 
     model_config = ConfigDict(

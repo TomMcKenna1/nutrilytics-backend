@@ -24,6 +24,7 @@ from firebase_admin import firestore
 from app.api.deps import get_current_user
 from app.db.firebase import get_firestore_client
 from app.models.meal import (
+    DataSource,
     MealDB,
     GeneratedMeal,
     MealComponentDB,
@@ -89,16 +90,21 @@ def _convert_db_data_to_business_logic_meal(meal_data: GeneratedMeal) -> Busines
     """Converts a GeneratedMeal Pydantic model into a business logic Meal object."""
 
     def convert_nutrient_profile(np_db: NutrientProfileDB) -> NutrientProfile:
-        return NutrientProfile(**np_db.model_dump())
+        dumped_data = np_db.model_dump()
+        if "data_source" in dumped_data and isinstance(dumped_data["data_source"], str):
+            dumped_data["data_source"] = DataSource(dumped_data["data_source"])
+        return NutrientProfile(**dumped_data)
 
     components = [
         MealComponent(
             name=comp_db.name,
             quantity=comp_db.quantity,
+            metric=comp_db.metric,
             total_weight=comp_db.total_weight,
             component_type=BusinessComponentType(comp_db.type.value),
             nutrient_profile=convert_nutrient_profile(comp_db.nutrient_profile),
             brand=comp_db.brand,
+            source_url=comp_db.source_url,
             id=comp_db.id,
         )
         for comp_db in meal_data.components
