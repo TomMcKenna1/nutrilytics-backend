@@ -150,9 +150,11 @@ def _get_meal_logs_collection(db: AsyncClient, user_id: str):
 async def _generate_and_update_meal(
     db: AsyncClient, meal_id: str, description: str, user_id: str
 ):
-    """Generates meal data, updates Firestore, and publishes a notification."""
+    """
+    Generates meal data, updates Firestore, and publishes a notification.
+    """
     meal_ref = _get_meal_logs_collection(db, user_id).document(meal_id)
-    update_payload = {}
+
     try:
         business_meal = await meal_generator.generate_meal_async(description)
         generated_data_model = _convert_business_logic_meal_to_db_model(business_meal)
@@ -161,7 +163,7 @@ async def _generate_and_update_meal(
             "status": MealGenerationStatus.COMPLETE.value,
             "error": None,
         }
-    except MealGenerationError as e:
+    except Exception as e:
         logger.error(f"Meal generation failed for meal '{meal_id}': {e}", exc_info=True)
         update_payload = {"status": MealGenerationStatus.ERROR.value, "error": str(e)}
     finally:
