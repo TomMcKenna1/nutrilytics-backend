@@ -3,7 +3,7 @@ from collections import defaultdict
 import logging
 import uuid
 from typing import Any, Dict, List, Optional
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from fastapi.responses import StreamingResponse
 from pydantic import ValidationError
@@ -285,15 +285,32 @@ async def create_meal(
 async def get_meal_list(
     limit: int = Query(10, ge=1, le=20),
     next_cursor: Optional[str] = Query(None, alias="next"),
+    log_date: Optional[date] = Query(None, alias="date"),
     user: AuthUser = Depends(get_current_user),
     db: AsyncClient = Depends(get_firestore_client),
 ):
     """Retrieves a paginated list of the user's meals."""
     try:
         meals_ref = _get_meal_logs_collection(db, user.uid)
-        query = meals_ref.order_by(
-            "createdAt", direction=FirestoreQuery.DESCENDING
-        ).order_by("__name__", direction=FirestoreQuery.DESCENDING)
+
+        if log_date:
+            start_of_day = datetime.combine(
+                log_date, datetime.min.time(), tzinfo=timezone.utc
+            )
+            end_of_day = datetime.combine(
+                log_date, datetime.max.time(), tzinfo=timezone.utc
+            )
+            query = (
+                meals_ref.where("createdAt", ">=", start_of_day)
+                .where("createdAt", "<=", end_of_day)
+                .order_by("createdAt", direction=FirestoreQuery.DESCENDING)
+                .order_by("__name__", direction=FirestoreQuery.DESCENDING)
+            )
+        else:
+            query = meals_ref.order_by(
+                "createdAt", direction=FirestoreQuery.DESCENDING
+            ).order_by("__name__", direction=FirestoreQuery.DESCENDING)
+
         if next_cursor:
             last_doc = await meals_ref.document(next_cursor).get()
             if not last_doc.exists:
