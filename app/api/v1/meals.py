@@ -250,11 +250,14 @@ async def create_meal(
     await update_streak(db, current_user)
 
     doc_ref = _get_meal_logs_collection(db, current_user.uid).document()
+
+    created_at_datetime = datetime.fromtimestamp(request.createdAt, tz=timezone.utc)
+
     meal_placeholder = MealDB(
         id=doc_ref.id,
         original_input=request.description,
         status=MealGenerationStatus.PENDING,
-        created_at=firestore.SERVER_TIMESTAMP,
+        created_at=created_at_datetime,
     )
     try:
         await doc_ref.set(

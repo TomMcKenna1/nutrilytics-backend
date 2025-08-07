@@ -15,6 +15,7 @@ class MealGenerationRequest(BaseModel):
     """Request body to generate a new meal."""
 
     description: str
+    createdAt: float
 
 
 class AddComponentRequest(BaseModel):
