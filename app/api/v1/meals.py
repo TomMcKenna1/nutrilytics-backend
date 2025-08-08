@@ -349,7 +349,7 @@ async def stream_meal_updates(
     async def event_generator():
         """
         Subscribes to the in-memory notifier and yields events formatted
-        manually for the SSE protocol.
+        manually for the SSE protocol. Includes a heartbeat.
         """
         queue = notifier.subscribe(current_user.uid)
         try:
@@ -357,12 +357,16 @@ async def stream_meal_updates(
                 if await request.is_disconnected():
                     break
 
-                meal_update: MealDB = await queue.get()
+                try:
+                    meal_update: MealDB = await asyncio.wait_for(
+                        queue.get(), timeout=15.0
+                    )
+                    event_data = meal_update.model_dump_json(by_alias=True)
+                    sse_message = f"event: meal_update\ndata: {event_data}\n\n"
+                    yield sse_message
+                except asyncio.TimeoutError:
+                    yield ": keep alive\n\n"
 
-                event_data = meal_update.model_dump_json(by_alias=True)
-                sse_message = f"event: meal_update\ndata: {event_data}\n\n"
-
-                yield sse_message
         except asyncio.CancelledError:
             logger.info(f"SSE connection cancelled for user '{current_user.uid}'.")
         finally:
